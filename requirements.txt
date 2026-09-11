@@ -1,0 +1,39 @@
+# Runtime dependencies for the Python side (index.py, search.py, eval).
+#
+# Install with:
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv/bin/python --torch-backend=auto -r requirements.txt
+#
+# --torch-backend=auto picks the CUDA build matching the installed driver.
+# Do NOT install vllm into this environment: it pins its own torch and will
+# replace the CUDA build underneath everything else.
+
+# --- models ---------------------------------------------------------------
+torch
+torchvision
+transformers>=4.49        # SigLIP 2 support
+sentencepiece             # bge-m3 / gemma tokenizers
+protobuf
+accelerate                # device placement for quantized loading
+bitsandbytes              # 4-bit NF4 quantization of the captioner
+faster-whisper            # bundles Silero VAD
+
+# --- fetching -------------------------------------------------------------
+# yt-dlp resolves a submitted link to a playable stream and downloads it. It
+# lives on the Python side because that is where indexing lives: Go hands over a
+# URL and gets clips back, and never sees the bytes.
+yt-dlp
+
+# --- data -----------------------------------------------------------------
+numpy
+pillow
+huggingface_hub           # corpus + checkpoint downloads
+
+# --- database -------------------------------------------------------------
+psycopg[binary]
+
+# --- eval -----------------------------------------------------------------
+pandas
+
+# --- dev ------------------------------------------------------------------
+pytest
