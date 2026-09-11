@@ -1,0 +1,459 @@
+/* ── Cuepoint ─────────────────────────────────────────────────────────────
+   A cue point is a marked timestamp in a video. That is exactly what this
+   product returns, so the whole interface is built around one: a moment, its
+   time, and the evidence for why it matched.                              */
+
+:root {
+  --bg: #0b0d12;
+  --bg-elev: #11141b;
+  --panel: #151922;
+  --panel-hi: #1c212c;
+  --line: #232935;
+  --line-hi: #303849;
+
+  --text: #eaeef6;
+  --text-dim: #aab3c5;
+  --muted: #6f7a8f;
+
+  --accent: #7aa2ff;
+  --accent-2: #a97bff;
+  --accent-soft: rgba(122, 162, 255, 0.14);
+  --danger: #ff6b6b;
+  --ok: #4ade80;
+
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.6);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7f8fb;
+    --bg-elev: #fff;
+    --panel: #ffffff;
+    --panel-hi: #f2f5fa;
+    --line: #e4e8f0;
+    --line-hi: #d3d9e6;
+
+    --text: #131722;
+    --text-dim: #49536a;
+    --muted: #7a849a;
+
+    --accent: #4361ee;
+    --accent-2: #8b5cf6;
+    --accent-soft: rgba(67, 97, 238, 0.09);
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 12px 28px -16px rgba(16,24,40,.25);
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+/* a soft field of light behind the page, so flat panels read as layered */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(650px 340px at 12% -8%, var(--accent-soft), transparent 70%),
+    radial-gradient(520px 300px at 96% 0%, rgba(169,123,255,.10), transparent 70%);
+}
+#root { position: relative; z-index: 1; }
+
+a { color: inherit; text-decoration: none; }
+h1, h2, h3 { margin: 0; letter-spacing: -0.02em; font-weight: 640; }
+h1 { font-size: 25px; }
+h2 { font-size: 17px; }
+code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ── layout ───────────────────────────────────────────────────────────── */
+.app { display: flex; flex-direction: column; min-height: 100%; }
+main { flex: 1; width: 100%; max-width: 1040px; margin: 0 auto; padding: 30px 24px 80px; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.row { display: flex; gap: 10px; align-items: center; }
+.grow { flex: 1; min-width: 0; }
+.between { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── header ───────────────────────────────────────────────────────────── */
+.nav {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 6px;
+  padding: 12px 24px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 9px; margin-right: 18px; }
+.brand .name {
+  font-size: 16.5px; font-weight: 680; letter-spacing: -0.025em;
+  background: linear-gradient(100deg, var(--text), var(--accent) 140%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.tab {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 13px; border-radius: 999px;
+  font-size: 13.5px; color: var(--muted);
+  border: 1px solid transparent; transition: background .15s, color .15s;
+}
+.tab:hover { color: var(--text-dim); background: var(--panel); }
+.tab.active { color: var(--text); background: var(--panel); border-color: var(--line); }
+.tab.off { opacity: .4; cursor: not-allowed; }
+.tab svg { opacity: .85; }
+.nav .spacer { flex: 1; }
+
+/* ── controls ─────────────────────────────────────────────────────────── */
+input, button, select, textarea { font: inherit; color: var(--text); }
+input[type="text"], input[type="url"], input:not([type]) {
+  width: 100%; padding: 12px 14px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); transition: border-color .15s, box-shadow .15s;
+}
+input::placeholder { color: var(--muted); }
+input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+button {
+  display: inline-flex; align-items: center; gap: 7px; justify-content: center;
+  padding: 10px 15px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); transition: background .15s, border-color .15s, transform .08s;
+}
+button:hover:not(:disabled) { background: var(--panel-hi); border-color: var(--line-hi); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:focus-visible { outline: none; box-shadow: var(--ring); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent; color: #fff; font-weight: 560;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+button.ghost { background: transparent; border-color: transparent; color: var(--muted); padding: 8px 10px; }
+button.ghost:hover:not(:disabled) { color: var(--text); background: var(--panel-hi); }
+button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: transparent; }
+
+/* ── search bar ───────────────────────────────────────────────────────── */
+.searchbar { position: relative; display: flex; gap: 10px; }
+.searchbar .field { position: relative; flex: 1; }
+.searchbar .field svg { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--muted); }
+/* One shorthand, not four longhands: a later `padding:` rule elsewhere would
+   silently reset whichever sides this did not name. The room for the icon is
+   part of the layout, not a decoration. */
+.searchbar .field input { padding: 13px 14px 13px 40px; }
+
+/* ── surfaces ─────────────────────────────────────────────────────────── */
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow);
+}
+.card.interactive { transition: border-color .15s, transform .1s, background .15s; }
+.card.interactive:hover { border-color: var(--line-hi); background: var(--panel-hi); }
+
+.notice {
+  background: var(--panel); border: 1px dashed var(--line-hi);
+  border-radius: var(--radius); padding: 22px; color: var(--text-dim);
+  text-align: center;
+}
+.notice b { color: var(--text); }
+.notice.error { border-style: solid; border-color: var(--danger); color: var(--danger); text-align: left; }
+
+/* ── moment card ──────────────────────────────────────────────────────── */
+.moment { display: flex; gap: 14px; align-items: flex-start; }
+.moment .rank {
+  flex: none; width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center; font-size: 12px; font-weight: 600;
+  color: var(--muted); background: var(--panel-hi); border: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.moment .rank.top { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; }
+.timecode {
+  font-variant-numeric: tabular-nums; font-weight: 620; font-size: 13.5px;
+  white-space: nowrap; color: var(--text);
+  background: var(--panel-hi); border: 1px solid var(--line);
+  border-radius: 7px; padding: 3px 8px;
+}
+.caption-line { margin-top: 7px; color: var(--text-dim); font-size: 14px; }
+.speech-line { margin-top: 6px; color: var(--muted); font-size: 13px; font-style: italic; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.chip {
+  font-size: 11.5px; line-height: 1.6; color: var(--muted);
+  background: var(--panel-hi); border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 9px; font-variant-numeric: tabular-nums;
+}
+.chip.signal { color: var(--text-dim); border-color: var(--line-hi); }
+.chip.signal b { color: var(--accent); font-weight: 600; }
+
+/* ── meters ───────────────────────────────────────────────────────────── */
+.meter { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 10px; }
+.meter > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+
+/* ── timeline ─────────────────────────────────────────────────────────── */
+.timeline { position: relative; height: 42px; margin: 6px 0; }
+.timeline .track {
+  position: absolute; inset: 16px 0; border-radius: 5px;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.timeline .mark {
+  position: absolute; top: 10px; bottom: 10px; min-width: 4px; padding: 0;
+  border: 0; border-radius: 3px; background: var(--accent-2); opacity: .55;
+  transition: opacity .12s, transform .12s;
+}
+.timeline .mark:hover { opacity: 1; transform: scaleY(1.25); }
+.timeline .mark.active {
+  opacity: 1; background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 0 1px var(--bg), 0 0 10px var(--accent);
+}
+
+/* ── media ────────────────────────────────────────────────────────────── */
+.embed {
+  aspect-ratio: 16 / 9; width: 100%; border: 1px solid var(--line);
+  border-radius: var(--radius); background: #000; display: block;
+}
+
+/* ── page furniture ───────────────────────────────────────────────────── */
+.page-head { margin-bottom: 20px; }
+.page-head .sub { color: var(--muted); font-size: 13.5px; margin-top: 5px; }
+.muted { color: var(--muted); font-size: 13px; }
+.dim { color: var(--text-dim); }
+.results-meta {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+  color: var(--muted); font-size: 12.5px; margin: 16px 0 12px;
+}
+
+.filters { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px; font-size: 12.5px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line);
+  cursor: pointer; user-select: none; transition: all .14s;
+}
+.toggle:hover:not(.disabled) { color: var(--text-dim); border-color: var(--line-hi); }
+.toggle.on { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+.toggle.disabled { opacity: .35; cursor: not-allowed; }
+.toggle input { display: none; }
+
+.log {
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px; font: 12.5px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-height: 320px; overflow: auto; white-space: pre-wrap; color: var(--text-dim);
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hi) 37%, var(--panel) 63%);
+  background-size: 400% 100%; animation: shimmer 1.3s ease infinite;
+  border-radius: var(--radius); height: 74px;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+@media (max-width: 640px) {
+  main { padding: 22px 16px 60px; }
+  .nav { padding: 10px 14px; }
+  .tab span.label { display: none; }
+}
+
+/* ── accounts ──────────────────────────────────────────────────────────────
+   An account is optional throughout, so the control is a quiet one in the
+   nav rather than a gate in front of the app.                            */
+
+button.signin { color: var(--text-dim); border-color: var(--line); background: var(--panel); }
+button.signin:hover:not(:disabled) { color: var(--text); border-color: var(--line-hi); }
+
+.avatar-skeleton {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--panel); border: 1px solid var(--line);
+}
+
+.account { position: relative; }
+
+.avatar-button {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 4px 10px 4px 4px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.avatar-button:hover { background: var(--panel-hi); border-color: var(--line-hi); }
+
+.avatar {
+  display: grid; place-items: center;
+  width: 26px; height: 26px; border-radius: 50%;
+  font-size: 12.5px; font-weight: 650; color: #fff; letter-spacing: .01em;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.avatar.large { width: 36px; height: 36px; font-size: 15px; }
+
+.avatar-button .email {
+  max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; color: var(--text-dim);
+}
+
+.menu {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 30;
+  min-width: 252px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.menu-head {
+  display: flex; gap: 11px; align-items: center;
+  padding: 10px 10px 12px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+}
+.menu-item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border-color: transparent; color: var(--text-dim);
+}
+.menu-item:hover:not(:disabled) { background: var(--panel-hi); color: var(--text); }
+
+/* ── sign-in dialog ─────────────────────────────────────────────────────── */
+
+.backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center; padding: 24px;
+  background: rgba(6, 8, 12, .62);
+  backdrop-filter: blur(5px);
+  animation: fade .14s ease-out;
+}
+@keyframes fade { from { opacity: 0 } }
+
+.dialog {
+  width: min(400px, 100%);
+  padding: 22px;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: 18px; box-shadow: var(--shadow);
+  animation: rise .16s cubic-bezier(.2,.8,.3,1);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.985) } }
+
+.dialog-head { display: flex; gap: 13px; align-items: flex-start; margin-bottom: 20px; }
+.dialog-head h2 { font-size: 18px; margin: 0 0 3px; letter-spacing: -.015em; }
+.dialog-head p { margin: 0; }
+.dialog-foot { margin-top: 16px; text-align: center; }
+
+/* Named for what it is. It used to be `.field`, which the search bar also uses
+   for its icon wrapper -- and the `padding` shorthand below silently reset the
+   search input's left padding, putting the placeholder under the icon. */
+.form-field { display: block; }
+.form-field > span {
+  display: block; margin-bottom: 6px;
+  font-size: 12.5px; color: var(--muted); letter-spacing: .01em;
+}
+.form-field input {
+  width: 100%; padding: 10px 12px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.form-field input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+button.link {
+  display: inline; padding: 0; background: none; border: none;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+button.link:hover:not(:disabled) { background: none; filter: brightness(1.15); }
+
+/* ── ownership notices ─────────────────────────────────────────────────── */
+
+.notice.ok { border-style: solid; border-color: var(--ok); color: var(--text-dim); text-align: left; }
+.notice.subtle {
+  display: flex; align-items: center; gap: 11px;
+  text-align: left; border-style: solid; color: var(--text-dim);
+}
+.notice.subtle svg { color: var(--muted); flex: none; }
+.notice.claim { display: flex; align-items: center; gap: 8px; }
+.notice.claim .link { margin-left: auto; }
+.small { font-size: 12.5px; }
+
+/* A moment is a span, not a clip: show how long it is and how much of it
+   matched, so a merged result reads as one answer rather than a lucky hit. */
+.chip.span { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ── in-video search ───────────────────────────────────────────────────────
+   A match is a span with a rank, not an anonymous tick. Marking every hit
+   identically is what made searching inside a video look like it had done
+   nothing — the bar just filled up.                                       */
+.timeline .playhead {
+  position: absolute; top: -3px; width: 2px; height: calc(100% + 6px);
+  background: var(--text); border-radius: 2px; pointer-events: none;
+}
+.moment.active { border-color: var(--accent); background: var(--panel-hi); }
+.truncate-2 {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; margin-top: 6px;
+}
+.skeleton-row {
+  height: 58px; border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--panel), var(--panel-hi), var(--panel));
+  background-size: 200% 100%; animation: shimmer 1.2s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0 } }
+
+/* ── video cards ───────────────────────────────────────────────────────────
+   A still, then the title. YouTube serves its own thumbnails, so nothing here
+   is stored on our side; anything else gets a generated placeholder rather
+   than a broken-image icon.                                                */
+.video-card { padding: 0; overflow: hidden; display: block; }
+.video-card > a { display: block; position: relative; line-height: 0; }
+
+.thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--panel-hi);
+  display: grid; place-items: center;
+  overflow: hidden;
+}
+.thumb img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  transition: transform .28s cubic-bezier(.2,.8,.3,1);
+}
+.video-card:hover .thumb img { transform: scale(1.035); }
+
+.thumb.placeholder { color: rgba(255,255,255,.5); }
+.thumb.placeholder svg { width: 30px; height: 30px; }
+.thumb.placeholder .badge {
+  position: absolute; bottom: 8px; left: 8px;
+  font-size: 11px; letter-spacing: .02em; line-height: 1;
+  padding: 4px 7px; border-radius: 999px;
+  background: rgba(0,0,0,.55); color: rgba(255,255,255,.85);
+}
+
+/* Sits on the still, bottom-right, the way every video player does it. */
+.video-card .duration {
+  position: absolute; right: 8px; bottom: 8px;
+  font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 1;
+  padding: 4px 6px; border-radius: 5px;
+  background: rgba(0,0,0,.72); color: #fff;
+}
+
+.video-body { padding: 11px 13px 13px; }
+.video-title {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-weight: 560; font-size: 13.5px; line-height: 1.38;
+  color: var(--text); text-decoration: none;
+}
+.video-title:hover { color: var(--accent); }
+.row.between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* The still on a search result. Narrower than a library card — here it is a
+   way to recognise which video a hit came from, not the subject of the card. */
+.moment-thumb {
+  flex: none; width: 132px; line-height: 0;
+  border-radius: var(--radius-sm); overflow: hidden;
+  border: 1px solid var(--line);
+}
+.moment-thumb .thumb { border-radius: 0; }
+.moment-thumb .placeholder svg { width: 22px; height: 22px; }
+.moment-thumb .placeholder .badge { bottom: 5px; left: 5px; font-size: 10px; padding: 3px 5px; }
+
+/* Below this the still costs more room than it earns. */
+@media (max-width: 560px) {
+  .moment-thumb { display: none; }
+}
