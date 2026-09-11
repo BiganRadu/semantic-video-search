@@ -1,0 +1,17 @@
+.venv/
+data/
+scratch/
+bin/
+*.pyc
+__pycache__/
+.env
+web/node_modules/
+web/dist/
+
+# Kept out of the repo: everything that exists to measure or bulk-load the
+# QVHighlights corpus, plus the test suite. These are development scaffolding
+# for a corpus that is being replaced, not part of what the project ships.
+tests/
+python/eval/
+eval/
+scripts/
