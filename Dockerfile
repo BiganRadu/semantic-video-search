@@ -3,7 +3,7 @@
 # Three stages because the build needs Node and Go and the result needs
 # neither: what ships is a static Go binary, the Python sources, and two small
 # packages. Python is in the final image because the search worker is a Python
-# subprocess, which Render's native Go runtime would not provide.
+# subprocess, so a Go-only runtime is not enough.
 
 # --- frontend ---------------------------------------------------------------
 FROM node:22-slim AS web
