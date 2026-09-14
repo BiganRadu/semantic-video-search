@@ -328,6 +328,23 @@ class Searcher:
             for r in cur.fetchall()
         ]
 
+    def attach_titles(self, results: list[dict]) -> None:
+        """Add each result's video title, for display.
+
+        Looked up once over the final page rather than carried through
+        retrieval: the candidate lists are orders of magnitude longer than the
+        results, and nothing before this point reads the title.
+        """
+        ids = {r["video_id"] for r in results}
+        if not ids:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT id, title FROM videos WHERE id = ANY(%s)", [list(ids)])
+            titles = dict(cur.fetchall())
+        for r in results:
+            if titles.get(r["video_id"]):
+                r["title"] = titles[r["video_id"]]
+
     def corpus_size(self, scope: "Scope") -> dict:
         """What was actually searched. Recall is meaningless without it, and a
         visitor should see the size of their own corpus, not the whole table."""
@@ -687,6 +704,7 @@ class Searcher:
         fused = self.fuse(lists, None, weights)
         results = (self.assemble(fused, k, gap, max_len, decay, floor, per_video, floors)
                    if assemble else fused[:k])
+        self.attach_titles(results)
 
         return {
             "ok": True,

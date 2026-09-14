@@ -46,8 +46,13 @@ export default function MomentCard({
               rather than anything real, so showing it would claim a precision
               the system does not have. */}
           <span className="timecode">{mmss(seek)}</span>
-          <Link to={to} className="truncate dim" style={{ fontSize: 13.5 }}>
-            {moment.video_id}
+          <Link
+            to={to}
+            className="truncate dim"
+            style={{ fontSize: 13.5 }}
+            title={moment.title ?? moment.video_id}
+          >
+            {moment.title ?? moment.video_id}
           </Link>
         </div>
 

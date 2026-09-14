@@ -25,6 +25,8 @@ export interface MomentClip {
 export interface Moment {
   clip_id: number;
   video_id: string;
+  /** The video's title, for display. Absent if it was never resolved. */
+  title?: string;
   start_s: number;
   end_s: number;
   peak_s?: number;

@@ -11,9 +11,7 @@ DB_VOLUME    ?= vs-pgdata
 export GEMINI_API_KEY
 
 # Which database every target talks to. `make run DB=aiven` uses the hosted one,
-# anything else the local container. Search against Aiven measured ~2x the local
-# latency (median 566ms vs 285ms, network round-trips), so local stays the
-# default for development and Aiven is what the deployment points at.
+# anything else the local container.
 DB ?= local
 ifeq ($(DB),aiven)
   DATABASE_URL ?= $(AIVEN_DATABASE_URL)
