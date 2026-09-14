@@ -177,9 +177,6 @@ The image installs `requirements-remote.txt` — numpy and the Kaggle client,
 no torch — so it builds to **241 MB and idles at ~24 MB RSS**. Search costs
 ~2 minutes that way, against ~1.2 s locally.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and [REMOTE.md](REMOTE.md)
-for the Kaggle setup.
-
 ## Running locally
 
 Docker, Go 1.26, Node 22, Python 3.12, `uv`. A GPU is needed only for indexing.
