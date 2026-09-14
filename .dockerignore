@@ -1,0 +1,15 @@
+# Weights, corpora and scratch: gigabytes that must not enter the build
+# context, and none of which the container needs.
+models/
+data/
+scratch/
+bin/
+.venv/
+web/node_modules/
+web/dist/
+.git/
+.env
+__pycache__/
+*.pyc
+tests/
+eval/

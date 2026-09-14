@@ -1,0 +1,12 @@
+# Python dependencies when the models run elsewhere (REMOTE_MODELS=true).
+#
+# This is the whole list. search.py imports torch and transformers lazily,
+# inside the methods that use them, so a remote searcher never touches either --
+# it only builds a notebook, pushes it, and reads the result back. Installing
+# requirements.txt here would pull several GB of CUDA wheels that nothing on
+# this host can run.
+#
+#   uv pip install -r requirements-remote.txt
+
+numpy                     # module-level in lib/models.py, and small
+kaggle                    # pushes and polls the jobs that do the real work

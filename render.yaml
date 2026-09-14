@@ -1,0 +1,35 @@
+# Render service definition.
+#
+# Indexing is left enabled: with REMOTE_MODELS the work happens on a Kaggle
+# kernel, so this container only pushes the job and polls for it. A job that
+# outlives a container restart is lost to this process, but the row it claimed
+# is released at startup and can be retried.
+services:
+  - type: web
+    name: cuepoint-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: REMOTE_MODELS
+        value: "true"
+      - key: INDEXING_ENABLED
+        value: "true"
+
+      # Set these in the dashboard, not here -- they are credentials.
+      - key: DATABASE_URL
+        sync: false
+      - key: KAGGLE_API_TOKEN
+        sync: false
+      # Optional: without it, query routing falls back to the default weights.
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Only needed when the frontend is served from another origin. Leave
+      # unset while this container serves it, so the session cookie keeps its
+      # stricter SameSite setting.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: CROSS_SITE
+        sync: false
