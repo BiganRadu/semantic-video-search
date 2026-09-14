@@ -5,9 +5,13 @@ import { ExternalIcon } from "./Icons";
 import Thumbnail from "./Thumbnail";
 
 /**
- * One ranked moment, with the evidence for it. The per-signal scores are shown
- * because a result you cannot explain is a result you cannot debug — and this
- * is the panel that made near-duplicate flooding obvious.
+ * One ranked moment.
+ *
+ * The per-signal scores that used to sit here were a debugging instrument that
+ * outlived its job: raw fusion numbers ("visual 0.109") mean nothing to someone
+ * searching, and two results a hair apart looked meaningfully different. Which
+ * signals ran is still reported once, on the results header, where it explains
+ * the whole page instead of decorating every row.
  */
 export default function MomentCard({
   moment, rank, query,
@@ -24,8 +28,6 @@ export default function MomentCard({
   const to = `/video/${encodeURIComponent(moment.video_id)}?t=${seek}${
     query ? `&q=${encodeURIComponent(query)}` : ""
   }`;
-  const span = Math.round(moment.end_s - moment.start_s);
-  const parts = moment.clips?.length ?? 1;
 
   return (
     <div className="card interactive moment">
@@ -43,27 +45,17 @@ export default function MomentCard({
 
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="row" style={{ gap: 9 }}>
-          <span className="timecode">
-            {mmss(moment.start_s)}–{mmss(moment.end_s)}
-          </span>
-          <span className="chip span" title={
-            parts > 1
-              ? `${parts} adjacent clips matched and were merged into one moment`
-              : "one clip matched"
-          }>
-            {span}s{parts > 1 && ` · ${parts} clips`}
-          </span>
+          {/*
+            One timestamp. Adjacent clips are still merged — that is what stops
+            one event filling the page — but the merged span was always the 20s
+            cap rather than the length of anything real (31 of 32 results hit it
+            exactly), so reporting it claimed a precision the system does not
+            have. The seek point is the answer.
+          */}
+          <span className="timecode">{mmss(seek)}</span>
           <Link to={to} className="truncate dim" style={{ fontSize: 13.5 }}>
             {moment.video_id}
           </Link>
-        </div>
-
-        <div className="chips">
-          {Object.entries(moment.signals).map(([name, score]) => (
-            <span className="chip signal" key={name}>
-              {name} <b>{score.toFixed(3)}</b>
-            </span>
-          ))}
         </div>
 
         {/* relative strength of the best matching signal, at a glance */}

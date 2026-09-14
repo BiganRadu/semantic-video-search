@@ -1,5 +1,5 @@
 import type {
-  AppConfig, AuthResponse, Collection, SearchResponse, SignalName,
+  AppConfig, AuthResponse, Collection, IndexJob, SearchResponse,
   VideoDetailResponse, VideoSummary,
 } from "./types";
 
@@ -44,7 +44,6 @@ export const api = {
     q: string;
     collection: Collection;
     k?: number;
-    signals?: SignalName[];
     scope?: "corpus" | "video";
     videoId?: string;
   }) => {
@@ -53,7 +52,6 @@ export const api = {
     // breadth -- so there is one place that number lives.
     const params = new URLSearchParams({ q: opts.q, collection: opts.collection });
     if (opts.k) params.set("k", String(opts.k));
-    if (opts.signals?.length) params.set("signals", opts.signals.join(","));
     if (opts.scope) params.set("scope", opts.scope);
     if (opts.videoId) params.set("video_id", opts.videoId);
     return get<SearchResponse>(`/api/search?${params}`);
@@ -65,6 +63,10 @@ export const api = {
     ),
 
   video: (id: string) => get<VideoDetailResponse>(`/api/videos/${encodeURIComponent(id)}`),
+
+  // This visitor's index jobs, queued and running. Scoped to the session or
+  // account server-side; one person's queue is not another's business.
+  jobs: () => get<{ jobs: IndexJob[] }>("/api/jobs"),
 
   deleteVideo: async (id: string) => {
     const res = await fetch(`/api/videos/${encodeURIComponent(id)}`, {

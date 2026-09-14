@@ -52,6 +52,17 @@ export interface SearchResponse {
   k: number;
   corpus: { videos: number; clips: number };
   assemble?: boolean;
+  /**
+   * How the query was prepared: its class (which picks the weights) and the
+   * phrasing sent to each index. Null when routing is off or the model did not
+   * answer in time — the raw query and default weights are used then.
+   */
+  plan?: {
+    class: string;
+    confidence: number;
+    queries: Partial<Record<SignalName, string>>;
+    took_ms: number;
+  } | null;
   coverage?: Partial<Record<SignalName | "clips", number>>;
   results: Moment[];
   took_ms: number;
@@ -112,4 +123,19 @@ export interface AppConfig {
   auth_required: boolean;
   accounts_enabled?: boolean;
   user?: User | null;
+}
+
+/** One index job belonging to this session or account. */
+export interface IndexJob {
+  id: string;
+  title?: string;
+  /** queued while something else is indexing; only one runs at a time. */
+  state: "queued" | "indexing" | "done" | "failed";
+  stage?: string;
+  done?: number;
+  total?: number;
+  /** 1-based place in the queue, present only while queued. */
+  position?: number;
+  error?: string;
+  started: number;
 }

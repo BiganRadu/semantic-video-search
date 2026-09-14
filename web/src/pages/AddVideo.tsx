@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useConfig } from "../config";
+import { mmss } from "../api/time";
 
 interface ProgressEvent {
   event: "progress" | "done" | "error";
@@ -9,7 +10,6 @@ interface ProgressEvent {
   total?: number;
   message?: string;
   video_id?: string;
-  clips?: number;
   duration_s?: number;
 }
 
@@ -76,7 +76,7 @@ export default function AddVideo() {
               say(ev.total && ev.total > 1 ? `${ev.stage} ${ev.done}/${ev.total}` : `${ev.stage}`);
             }
           } else if (ev.event === "done") {
-            say(`done — ${ev.clips} clips, ${Math.round(ev.duration_s ?? 0)}s`);
+            say(`done — indexed ${mmss(ev.duration_s ?? 0)} of video`);
             setDone(true);
           } else if (ev.event === "error") {
             say(`error: ${ev.message}`);

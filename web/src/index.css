@@ -189,10 +189,12 @@ button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--d
   background: var(--panel-hi); border: 1px solid var(--line);
   border-radius: 999px; padding: 1px 9px; font-variant-numeric: tabular-nums;
 }
-.chip.signal { color: var(--text-dim); border-color: var(--line-hi); }
-.chip.signal b { color: var(--accent); font-weight: 600; }
 
 /* ── meters ───────────────────────────────────────────────────────────── */
+/* The query-class badge. Not a score -- it says which way the query was
+   routed, which is the one piece of ranking reasoning worth surfacing. */
+.chip.plan { color: var(--text-dim); border-color: var(--line-hi); }
+
 .meter { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 10px; }
 .meter > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 
@@ -228,18 +230,6 @@ button.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--d
   display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
   color: var(--muted); font-size: 12.5px; margin: 16px 0 12px;
 }
-
-.filters { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
-.toggle {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 11px; border-radius: 999px; font-size: 12.5px;
-  color: var(--muted); background: var(--panel); border: 1px solid var(--line);
-  cursor: pointer; user-select: none; transition: all .14s;
-}
-.toggle:hover:not(.disabled) { color: var(--text-dim); border-color: var(--line-hi); }
-.toggle.on { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
-.toggle.disabled { opacity: .35; cursor: not-allowed; }
-.toggle input { display: none; }
 
 .log {
   background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
@@ -371,9 +361,6 @@ button.link:hover:not(:disabled) { background: none; filter: brightness(1.15); }
 .notice.claim .link { margin-left: auto; }
 .small { font-size: 12.5px; }
 
-/* A moment is a span, not a clip: show how long it is and how much of it
-   matched, so a merged result reads as one answer rather than a lucky hit. */
-.chip.span { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* ── in-video search ───────────────────────────────────────────────────────
    A match is a span with a rank, not an anonymous tick. Marking every hit
@@ -456,4 +443,53 @@ button.link:hover:not(:disabled) { background: none; filter: brightness(1.15); }
 /* Below this the still costs more room than it earns. */
 @media (max-width: 560px) {
   .moment-thumb { display: none; }
+}
+
+/* --- indexing dock -------------------------------------------------------
+   Bottom-left, fixed. Indexing is slow and one-at-a-time, so "is my video
+   moving?" needs an answer on every page, not just the one that started it. */
+.jobs-dock {
+  position: fixed; left: 16px; bottom: 16px; z-index: 40;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  max-width: min(360px, calc(100vw - 32px));
+}
+.jobs-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 999px;
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--line-hi); cursor: pointer;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
+  font-size: 13px;
+}
+.jobs-toggle:hover { border-color: var(--accent); }
+.jobs-toggle.busy { border-color: var(--accent); }
+
+.jobs-panel {
+  width: min(360px, calc(100vw - 32px));
+  box-shadow: 0 10px 34px rgb(0 0 0 / 0.34);
+  max-height: 52vh; overflow-y: auto;
+}
+.jobs-head { margin-bottom: 10px; }
+.job-row { padding: 8px 0; border-top: 1px solid var(--line); }
+.job-row:first-child { border-top: 0; padding-top: 0; }
+.job-name { font-size: 13px; }
+
+.job-state {
+  font-size: 11px; letter-spacing: 0.04em; white-space: nowrap;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-hi);
+  color: var(--text-dim);
+}
+.job-state.indexing { color: var(--accent); border-color: var(--accent); }
+.job-state.done { color: #4ade80; border-color: #4ade8055; }
+.job-state.failed { color: #f87171; border-color: #f8717155; }
+
+.spinner {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--line-hi); border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
 }

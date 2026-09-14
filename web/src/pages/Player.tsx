@@ -58,7 +58,6 @@ export default function Player() {
         <h1 className="truncate">{video.title || video.id}</h1>
         <div className="chips" style={{ marginTop: 8 }}>
           <span className="chip">{mmss(video.duration_s)}</span>
-          <span className="chip">{video.clips.length} clips</span>
           <span className="chip">{video.source}</span>
           {video.language && <span className="chip">{video.language}</span>}
           {video.pipeline && <span className="chip">{video.pipeline}</span>}
@@ -226,19 +225,8 @@ function Matches({
             <span className={`rank${i < 3 ? " top" : ""}`}>{i + 1}</span>
             <div className="grow" style={{ minWidth: 0, textAlign: "left" }}>
               <div className="row" style={{ gap: 9 }}>
-                <span className="timecode">{mmss(m.start_s)}–{mmss(m.end_s)}</span>
-                {m.relevance !== undefined && (
-                  <span className="chip signal">
-                    match <b>{Math.round(m.relevance * 100)}%</b>
-                  </span>
-                )}
-                <span className="chips">
-                  {Object.entries(m.signals).map(([name, score]) => (
-                    <span className="chip signal" key={name}>
-                      {name} <b>{score.toFixed(2)}</b>
-                    </span>
-                  ))}
-                </span>
+                {/* The seek point, not the merged span: see MomentCard. */}
+                <span className="timecode">{mmss(seek)}</span>
               </div>
               {caption && <div className="caption-line truncate-2">{caption}</div>}
             </div>
@@ -257,7 +245,7 @@ function ClipPanel({ clip }: { clip: ClipDetail }) {
       {clip.caption ? (
         <div className="caption-line">{clip.caption}</div>
       ) : (
-        <div className="caption-line muted">No caption indexed for this clip yet.</div>
+        <div className="caption-line muted">No caption indexed here yet.</div>
       )}
       {(clip.objects?.length || clip.actions?.length || clip.setting) && (
         <div className="chips">

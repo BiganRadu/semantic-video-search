@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { Collection, SearchResponse, SignalName, VideoSummary } from "../api/types";
-import { mmss } from "../api/time";
+import type { Collection, SearchResponse, VideoSummary } from "../api/types";
+import { hours, mmss } from "../api/time";
 import MomentCard from "./MomentCard";
 import Thumbnail from "./Thumbnail";
 import SearchBar from "./SearchBar";
-import SignalFilters from "./SignalFilters";
 import { ClockIcon, FilmIcon, TrashIcon } from "./Icons";
 
 /**
@@ -31,7 +30,6 @@ export default function CorpusPage({
 
   const [videos, setVideos] = useState<VideoSummary[] | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
-  const [signals, setSignals] = useState<SignalName[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,12 +53,12 @@ export default function CorpusPage({
     let cancelled = false;
     setBusy(true);
     setError(null);
-    api.search({ q: query, collection, signals: signals.length ? signals : undefined })
+    api.search({ q: query, collection })
       .then((r) => !cancelled && setResult(r))
       .catch((e) => !cancelled && setError(String(e.message ?? e)))
       .finally(() => !cancelled && setBusy(false));
     return () => { cancelled = true; };
-  }, [query, signals, collection]);
+  }, [query, collection]);
 
   const remove = async (id: string) => {
     if (!confirm(`Remove "${id}" from your index?\n\nThe video itself is untouched.`)) return;
@@ -73,7 +71,9 @@ export default function CorpusPage({
     }
   };
 
-  const clips = videos?.reduce((sum, v) => sum + v.clips, 0) ?? 0;
+  // Total runtime, not clip count: a clip is a 10s indexing window, which is
+  // an implementation detail of the pipeline and not a unit anyone searches in.
+  const seconds = videos?.reduce((sum, v) => sum + (v.duration_s ?? 0), 0) ?? 0;
 
   return (
     <div className="stack" style={{ gap: 20 }}>
@@ -96,8 +96,6 @@ export default function CorpusPage({
         }
       />
 
-      <SignalFilters selected={signals} coverage={result?.coverage} onChange={setSignals} />
-
       {error && <div className="notice error">{error}</div>}
 
       {query ? (
@@ -112,7 +110,7 @@ export default function CorpusPage({
         <>
           <div className="results-meta">
             <span><FilmIcon /></span>
-            <span>{videos.length} videos · {clips.toLocaleString()} clips indexed</span>
+            <span>{videos.length} videos · {hours(seconds)} indexed</span>
           </div>
           <div className="grid">
             {videos.map((v) => (
@@ -146,7 +144,7 @@ function Results({
       <div className="notice">
         No moments matched <b>“{query}”</b> in this corpus.
         <div className="muted" style={{ marginTop: 6 }}>
-          Searched {result.corpus.clips.toLocaleString()} clips across {result.corpus.videos} videos.
+          Searched all {result.corpus.videos} videos in this corpus.
         </div>
       </div>
     );
@@ -157,13 +155,27 @@ function Results({
       <div className="results-meta">
         <span>{result.results.length} moments</span>
         <span>·</span>
-        <span>
-          {result.corpus.clips.toLocaleString()} clips across {result.corpus.videos} videos
-        </span>
+        <span>across {result.corpus.videos} videos</span>
         <span>·</span>
         <span><ClockIcon /> {result.took_ms.toFixed(0)} ms</span>
         <span>·</span>
         <span>{result.signals.join(" + ")}</span>
+        {result.plan && (
+          <>
+            <span>·</span>
+            <span
+              className="chip plan"
+              title={
+                "The query was classified to pick the weights, and rephrased " +
+                "for each index:\n\n" +
+                Object.entries(result.plan.queries)
+                  .map(([k, v]) => `${k}: ${v}`).join("\n")
+              }
+            >
+              {result.plan.class} query
+            </span>
+          </>
+        )}
       </div>
       <div className="stack">
         {result.results.map((m, i) => (
@@ -195,7 +207,6 @@ function VideoCard({
         </Link>
         <div className="row between" style={{ marginTop: 8 }}>
           <div className="chips">
-            <span className="chip">{video.clips} clips</span>
             <span className="chip">{video.locator.kind}</span>
             {video.state !== "ready" && <span className="chip">{video.state}</span>}
           </div>

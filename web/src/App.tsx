@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import JobsPanel from "./components/JobsPanel";
 import { ConfigProvider, useConfig } from "./config";
 import { AuthProvider } from "./auth";
 import Logo from "./components/Logo";
@@ -60,6 +61,9 @@ export default function App() {
             </Routes>
           </main>
         </div>
+        {/* Outside <main> on purpose: it is fixed to the viewport corner and
+            follows you across routes, because an index outlives a page. */}
+        <JobsPanel />
         {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} />}
       </AuthProvider>
     </ConfigProvider>

@@ -8,7 +8,7 @@ import { useAuth } from "../auth";
  * The visitor's own corpus.
  *
  * Signed out it belongs to the browser: the server hands out an anonymous
- * session cookie and anything added under it lives for a week. Signed in it
+ * session cookie and anything added under it lives for a day. Signed in it
  * belongs to the account, stops expiring, and follows them to another browser.
  * The page is the same either way — an account changes how long the corpus
  * lasts and where it can be reached from, not what it can do.
@@ -25,7 +25,7 @@ export default function Mine({ onSignIn }: { onSignIn: () => void }) {
 
   const blurb = user
     ? `Signed in as ${user.email}. These videos are kept on your account.`
-    : "Videos you add, kept to this browser for a week. Sign in to keep them for good.";
+    : "Videos you add, kept to this browser for a day. Sign in to keep them for good.";
 
   return (
     <>
@@ -41,7 +41,7 @@ export default function Mine({ onSignIn }: { onSignIn: () => void }) {
         <div className="notice subtle signin-hint">
           <UserIcon />
           <span className="grow">
-            These videos live in this browser and expire after a week.
+            These videos live in this browser and expire after a day.
           </span>
           <button className="ghost" onClick={onSignIn}>Sign in to keep them</button>
         </div>
@@ -68,7 +68,7 @@ export default function Mine({ onSignIn }: { onSignIn: () => void }) {
                   <br />
                   {user
                     ? "They are kept on your account until you delete them."
-                    : "They stay tied to this browser for a week, then expire."}
+                    : "They stay tied to this browser for a day, then expire."}
                 </>
               ) : (
                 <>

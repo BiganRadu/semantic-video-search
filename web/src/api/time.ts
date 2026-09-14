@@ -5,6 +5,14 @@ export function mmss(seconds: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** A rough total, for "how much footage is in here" rather than a timestamp. */
+export function hours(seconds: number): string {
+  const m = Math.round(Math.max(0, seconds) / 60);
+  if (m < 60) return `${m} min`;
+  const h = m / 60;
+  return `${h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h)} hours`;
+}
+
 /**
  * Playback position in the ORIGINAL video.
  *
