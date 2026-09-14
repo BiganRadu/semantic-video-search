@@ -227,6 +227,11 @@ class Searcher:
         self._bge = None
         self.conn = psycopg.connect(DATABASE_URL, autocommit=True)
 
+        # Query routing, if a key is configured. Nothing downstream depends on
+        # it: with no router the weights are simply the measured defaults.
+        from python.lib.intent import Router
+        self.router = Router(self.conn)
+
     # Encoders load on first use, not at startup. A deployment whose weights
     # disable the caption and speech signals never touches bge-m3, and that is
     # 1.5 GB of resident memory on a box that may only have two. Measured:
@@ -699,22 +704,25 @@ class Searcher:
         scope = Scope(collection=collection, owner=req.get("owner"),
                       video_id=video_id if scope_name == "video" else None)
 
-        # The default is every implemented signal that measurement says earns
-        # its place. Retrieving a zero-weighted signal costs latency (127ms for
-        # speech+keyword) and cannot change the ranking. An explicit request
-        # still runs it, so ablations can measure what it would have done.
-        signals = req.get("signals") or [
-            s for s in IMPLEMENTED if DEFAULT_WEIGHTS.get(s, 0.0) > 0.0
-        ]
-        if isinstance(signals, str):
-            signals = [s.strip() for s in signals.split(",") if s.strip()]
-        for s in signals:
-            if s not in KNOWN:
-                return {"ok": False, "error": f"unknown signal {s!r} (known: {', '.join(KNOWN)})"}
-            if s not in IMPLEMENTED:
-                return {"ok": False,
-                        "error": f"signal {s!r} is not implemented yet "
-                                 f"(available: {', '.join(IMPLEMENTED)})"}
+        weights = dict(DEFAULT_WEIGHTS)
+
+        # Plan the query: what it is asking for, and how to phrase it for each
+        # index. Synchronous and uncached -- a slow model makes search slow, and
+        # a dead one leaves the raw query and the measured default weights.
+        plan = None
+        if as_bool(req.get("route"), True) and not req.get("weights"):
+            plan = self.router.plan(query)
+            if plan is not None:
+                weights = plan.weights()
+
+        override = req.get("weights")
+        if isinstance(override, str):          # "visual:1,speech:0.3"
+            for part in override.split(","):
+                name, _, value = part.partition(":")
+                if name.strip() and value.strip():
+                    weights[name.strip()] = float(value)
+        elif isinstance(override, dict):
+            weights.update({str(a): float(b) for a, b in override.items()})
 
         k = int(req.get("k") or DEFAULT_K.get(scope_name, 8))
         k = max(1, min(k, 100))
@@ -734,26 +742,31 @@ class Searcher:
         # silently return nothing.
         floors = MIN_RELEVANCE if as_bool(req.get("min_relevance"), True) else None
 
-        weights = dict(DEFAULT_WEIGHTS)
-        override = req.get("weights")
-        if isinstance(override, str):          # "visual:1,speech:0.3"
-            for part in override.split(","):
-                name, _, value = part.partition(":")
-                if name.strip() and value.strip():
-                    weights[name.strip()] = float(value)
-        elif isinstance(override, dict):
-            weights.update({str(a): float(b) for a, b in override.items()})
+        # Chosen after the weights, not before: a zero-weighted signal cannot
+        # change the ranking, so retrieving it only costs latency -- but routing
+        # changes which signals carry weight, and a speech query that never
+        # retrieved speech would be routed to nothing. An explicit request still
+        # runs whatever it asks for, so ablations measure what they intend to.
+        requested = req.get("signals")
+        signals = requested or [s for s in IMPLEMENTED if weights.get(s, 0.0) > 0.0]
+        if isinstance(signals, str):
+            signals = [s.strip() for s in signals.split(",") if s.strip()]
+        for s in signals:
+            if s not in KNOWN:
+                return {"ok": False, "error": f"unknown signal {s!r} (known: {', '.join(KNOWN)})"}
+            if s not in IMPLEMENTED:
+                return {"ok": False,
+                        "error": f"signal {s!r} is not implemented yet "
+                                 f"(available: {', '.join(IMPLEMENTED)})"}
 
+        # Each index gets its own phrasing of the query. Without a plan they all
+        # get the raw query, which is exactly the previous behaviour.
+        retrieve = {"visual": self.visual_candidates, "caption": self.caption_candidates,
+                    "speech": self.speech_candidates, "keyword": self.keyword_candidates}
         lists = {}
         for s in signals:
-            if s == "visual":
-                lists[s] = self.visual_candidates(query, scope)
-            elif s == "caption":
-                lists[s] = self.caption_candidates(query, scope)
-            elif s == "speech":
-                lists[s] = self.speech_candidates(query, scope)
-            elif s == "keyword":
-                lists[s] = self.keyword_candidates(query, scope)
+            text = plan.text_for(s, query) if plan else query
+            lists[s] = retrieve[s](text, scope)
 
         # Fusion runs over the whole candidate pool, not the top k: a moment
         # built from a truncated list would be cut off at the page boundary.
@@ -774,6 +787,7 @@ class Searcher:
             "corpus": self.corpus_size(scope),
             "coverage": self.coverage(scope),
             "weights": {s: weights.get(s, 1.0) for s in signals},
+            "plan": plan.as_json() if plan else None,
             "assemble": assemble,
             "moment": ({"gap": gap, "max_len": max_len, "decay": decay,
                         "floor": floor, "per_video": per_video,
@@ -783,11 +797,56 @@ class Searcher:
         }
 
 
+class RemoteSearcher:
+    """Answers the same protocol by running each query on Kaggle.
+
+    Exists because the deployment has no RAM for the encoders -- not even the
+    two that search needs. It is slow: one Kaggle kernel per query, minutes
+    rather than milliseconds. That is the cost of the free tier, and it is
+    visible to the caller only as latency.
+
+    Only one query runs at a time. Kaggle allows very few concurrent kernels
+    per account, and a second push while the first is running gets queued
+    behind it anyway -- the lock makes the wait explicit instead of turning it
+    into a pile of pending kernels.
+    """
+
+    def __init__(self):
+        import threading
+
+        from python.lib import remote
+
+        self._remote = remote
+        self._lock = threading.Lock()
+
+    def handle(self, req: dict) -> dict:
+        from python.lib.config import DATABASE_URL, GEMINI_API_KEY
+        from python.lib.remote import Job, RemoteError
+
+        job = Job(kind="search", gpu=False, payload={
+            "request": req,
+            # The kernel reads these from Kaggle Secrets when they are set; the
+            # values here are the fallback for an account not yet configured.
+            "database_url": DATABASE_URL,
+            "gemini_api_key": GEMINI_API_KEY,
+        })
+        # The serve loop is already one request at a time and Go serialises on
+        # top of that, so this lock is belt and braces -- but a second kernel
+        # pushed while the first runs would sit in Kaggle's queue anyway, and
+        # waiting here is cheaper than waiting there.
+        with self._lock:
+            try:
+                return self._remote.run(job)
+            except RemoteError as exc:
+                return {"ok": False, "error": str(exc)}
+
+
 def serve(searcher: Searcher) -> int:
     """One JSON request per line on stdin, one response per line on stdout."""
     # Warm whichever encoders the default weights actually use, so the first
     # real query does not pay the load. Signals weighted to zero stay unloaded.
-    for signal in IMPLEMENTED:
+    # A remote searcher holds no encoders: there is nothing here to warm.
+    for signal in [] if isinstance(searcher, RemoteSearcher) else IMPLEMENTED:
         if DEFAULT_WEIGHTS.get(signal, 0.0) <= 0.0:
             continue
         if signal == "visual":
@@ -818,19 +877,24 @@ def main() -> int:
     ap.add_argument("-k", type=int, default=0, help="0 uses the per-scope default")
     ap.add_argument("--no-assemble", action="store_true",
                     help="return raw clips instead of assembled moments")
+    ap.add_argument("--no-route", action="store_true",
+                    help="skip query planning: raw query, measured default weights")
+    ap.add_argument("--remote", action="store_true",
+                    help="run each query on Kaggle instead of loading models here")
     args = ap.parse_args()
 
     if not args.serve and not args.query:
         ap.error("pass --serve or --query")
 
-    searcher = Searcher()
+    searcher = RemoteSearcher() if args.remote else Searcher()
     if args.serve:
         return serve(searcher)
 
     result = searcher.handle({"q": args.query, "scope": args.scope,
                               "collection": args.collection,
                               "video_id": args.video_id, "k": args.k,
-                              "assemble": not args.no_assemble})
+                              "assemble": not args.no_assemble,
+                              "route": not args.no_route})
     print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
 

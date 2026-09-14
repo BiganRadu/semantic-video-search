@@ -7,6 +7,8 @@ installed at all, and scripts/check-boundary.sh enforces that.
 from __future__ import annotations
 
 import logging
+import re
+import time
 
 from .models import BGEM3, SigLIP
 
@@ -139,6 +141,37 @@ class IndexModels:
             self._captioner = Captioner(self.device)
         return self._captioner
 
+    def release(self, *names: str) -> None:
+        """Drop models from VRAM once their stage is done.
+
+        Stages run in order, so by the time captioning starts SigLIP and
+        Whisper have finished and are only occupying memory the captioner
+        could be using. On a 24 GB card that slack is free and this does
+        nothing useful; on a 15 GB one it is the difference between captioning
+        a batch of 16 and a batch of 4 -- four times the generate() calls for
+        the same video.
+
+        Reloading is a property away, so releasing something still needed
+        costs a load rather than an error. bge is deliberately easy to get
+        wrong here: caption embedding runs *after* captioning.
+        """
+        import gc
+
+        for name in names:
+            attr = f"_{name}"
+            if getattr(self, attr, None) is None:
+                continue
+            setattr(self, attr, None)
+            log.info("released %s from %s", name, self.device)
+
+        gc.collect()
+        if self.device.startswith("cuda"):
+            import torch
+
+            # Python dropping the reference is not enough: torch keeps the
+            # blocks in its caching allocator until told otherwise.
+            torch.cuda.empty_cache()
+
 
 # Lengths are part of the schema, not just the prompt. Constrained decoding
 # blocks EOS until the object is complete, so an unbounded string field means
@@ -146,10 +179,19 @@ class IndexModels:
 # Bounding the fields is what makes the output both valid and cheap.
 _SHORT_TEXT = {"type": "string", "maxLength": 90}
 
+# The ceiling is what actually bounds caption length: the model ignores the
+# prompt's request for two sentences and writes until something stops it. 400
+# was tried and reverted -- it bought no extra event description, only trailing
+# scenery ("a purple pillow is visible to her right") and, on one clip, a
+# verbatim repeated sentence. Both dilute the caption embedding. The event is
+# described in the first sentence or two; the rest is padding, so the budget
+# stays tight and tidy_caption repairs the ragged edge it leaves.
+CAPTION_MAX_CHARS = 260
+
 CAPTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "caption": {"type": "string", "maxLength": 260},
+        "caption": {"type": "string", "maxLength": CAPTION_MAX_CHARS},
         "people": {"type": "array", "items": _SHORT_TEXT, "maxItems": 5},
         "objects": {"type": "array", "items": _SHORT_TEXT, "maxItems": 8},
         "actions": {"type": "array", "items": _SHORT_TEXT, "maxItems": 6},
@@ -164,6 +206,15 @@ CAPTION_PROMPT = (
     "change, movement or action that unfolds.\n"
     "Be concrete and literal. Name what is visible. Do not speculate about "
     "motives, mood or backstory, and do not mention frames, images or video.\n"
+    # Measured on 12 clips against the prompt without these two lines: the
+    # "then" chaining that made captions run long and get cut fell from 21
+    # occurrences to 16, mean length 210 -> 222, and clips hitting the ceiling
+    # 7/12 -> 6/12. Asking additionally for "at most two sentences, ending in a
+    # full stop" was tried and reverted -- it did cut "then" harder (to 10) but
+    # the model answered the full-stop request by splitting into 4.0 sentences
+    # of trailing scenery, pushing length to 250 and truncation to 8/12.
+    "Summarise the event as a whole. Do not walk through the frames one by one "
+    "and do not chain clauses with \"then\" -- say what happened, once.\n"
     "Reply with JSON only. Keep every field short:\n"
     '  caption  one or two sentences describing the event\n'
     '  people   a few words per person, by appearance\n'
@@ -171,6 +222,25 @@ CAPTION_PROMPT = (
     '  actions  single verbs for what is being done\n'
     '  setting  a short phrase for where this takes place'
 )
+
+
+def _has_quantization_config(model_id: str) -> bool:
+    """Whether a checkpoint carries its own quantization settings.
+
+    Reads config.json directly rather than loading the model, because this
+    decides how to load it. A repo id that is not a local directory is treated
+    as full precision, which is what the published Qwen weights are.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    config = _Path(model_id) / "config.json"
+    if not config.is_file():
+        return False
+    try:
+        return "quantization_config" in json.loads(config.read_text())
+    except Exception:
+        return False
 
 
 class Captioner:
@@ -191,16 +261,37 @@ class Captioner:
 
         from .config import CAPTION_MODEL
 
-        quant = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        log.info("loading %s in 4-bit nf4", CAPTION_MODEL)
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            CAPTION_MODEL, quantization_config=quant, device_map=device, dtype=torch.bfloat16,
-        ).eval()
+        # bfloat16 only where the card has it. Ampere and later do; Turing --
+        # the Kaggle T4 -- does not, and asking for it there does not fail, it
+        # emulates, which turns captioning from slow into effectively stuck.
+        # float16 is the right fallback: same width, and Turing runs it in
+        # hardware.
+        want_bf16 = device.startswith("cuda") and torch.cuda.is_bf16_supported()
+        compute = torch.bfloat16 if want_bf16 else torch.float16
+        log.info("caption compute dtype: %s", compute)
+
+        # A checkpoint may arrive already quantized. Passing BitsAndBytesConfig
+        # for one of those conflicts with the quantization recorded in its own
+        # config, so read the config first and only quantize what is still full
+        # precision. A pre-quantized copy also skips ~5 GB of weights to read
+        # and the quantize pass at load, which matters when the weights are
+        # mounted fresh on every job.
+        if _has_quantization_config(CAPTION_MODEL):
+            log.info("loading %s (already quantized)", CAPTION_MODEL)
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                CAPTION_MODEL, device_map=device,
+            ).eval()
+        else:
+            quant = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=compute,
+                bnb_4bit_use_double_quant=True,
+            )
+            log.info("loading %s in 4-bit nf4", CAPTION_MODEL)
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                CAPTION_MODEL, quantization_config=quant, device_map=device, dtype=compute,
+            ).eval()
         self.processor = AutoProcessor.from_pretrained(CAPTION_MODEL)
         self.tokenizer = self.processor.tokenizer
         self._prompt_len = 0
@@ -275,10 +366,39 @@ class Captioner:
         return [frames[round(i * step)] for i in range(want)]
 
     def describe(self, clip_frames: list[list]) -> list[dict]:
-        """Caption a batch of clips. clip_frames[i] is one clip's PIL images."""
+        """Caption a batch of clips. clip_frames[i] is one clip's PIL images.
+
+        Two passes. The first generates unconstrained, which is about five
+        times faster: schema-constrained decoding runs a pure-Python parser
+        over a ~150k vocabulary once per token per sequence, and measured at
+        81% of all captioning time on an RTX 3090 -- it dominated the stage on
+        every machine, not just the slow ones.
+
+        The model follows the requested JSON on its own almost always. When it
+        does not, that clip alone is generated again with the enforcer, which
+        cannot produce malformed output. So the fast path carries the common
+        case and the guarantee is still there for the rest, with the retry rate
+        logged rather than assumed.
+        """
+        results = self._generate(clip_frames, constrain=False)
+
+        retry = [i for i, r in enumerate(results) if not r["caption"]]
+        if retry:
+            log.info("caption: %d/%d clips need the schema enforcer",
+                     len(retry), len(clip_frames))
+            fixed = self._generate([clip_frames[i] for i in retry], constrain=True)
+            for i, r in zip(retry, fixed):
+                results[i] = r
+        return results
+
+    def _generate(self, clip_frames: list[list], constrain: bool) -> list[dict]:
+        """One generate() over a batch, with or without the schema constraint."""
         import torch
 
         from .config import CAPTION_MAX_TOKENS
+
+        if not clip_frames:
+            return []
 
         messages = [
             [{"role": "user", "content": [{"type": "image"} for _ in images]
@@ -295,18 +415,48 @@ class Captioner:
         ).to(self.model.device)
 
         self._prompt_len = inputs["input_ids"].shape[1]
-        with torch.inference_mode():
+        extra = {}
+        if constrain:
             from transformers import LogitsProcessorList
 
+            if hasattr(self._prefix_fn, "reset"):
+                self._prefix_fn.reset()
+            extra["logits_processor"] = LogitsProcessorList([self._prefix_fn])
+
+        started = time.perf_counter()
+        with torch.inference_mode():
             generated = self.model.generate(
                 **inputs,
                 max_new_tokens=CAPTION_MAX_TOKENS,
                 do_sample=False,                  # captions must be reproducible
-                logits_processor=LogitsProcessorList([self._prefix_fn]),
                 pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                **extra,
             )
 
+        elapsed = time.perf_counter() - started
         trimmed = generated[:, inputs["input_ids"].shape[1]:]
+        tokens = int(trimmed.shape[0] * trimmed.shape[1])
+
+        # Kept because it is what found the enforcer in the first place: the
+        # split between masking and everything else is the difference between
+        # "the GPU is slow" and "the CPU is the bottleneck".
+        fn = self._prefix_fn
+        if constrain and getattr(fn, "calls", 0):
+            log.info(
+                "caption batch (constrained): %d clips, %d steps, %d tokens in "
+                "%.1fs (%.1f tok/s) | mask %.1fs (%.0f%%), of which enforcer "
+                "%.1fs (%.0f%%) | rest %.1fs",
+                len(clip_frames), fn.calls, tokens, elapsed,
+                tokens / elapsed if elapsed else 0,
+                fn.seconds, 100 * fn.seconds / elapsed if elapsed else 0,
+                fn.enforcer_seconds,
+                100 * fn.enforcer_seconds / elapsed if elapsed else 0,
+                elapsed - fn.seconds)
+        else:
+            log.info("caption batch: %d clips, %d tokens in %.1fs (%.1f tok/s)",
+                     len(clip_frames), tokens, elapsed,
+                     tokens / elapsed if elapsed else 0)
+
         texts = self.processor.batch_decode(trimmed, skip_special_tokens=True)
         return [parse_caption(t) for t in texts]
 
@@ -322,9 +472,24 @@ class CaptionLogitsProcessor:
     def __init__(self, captioner: "Captioner"):
         self.captioner = captioner
         self._bits = None
+        # Cheap counters, always on: two ints and a float per decode step cost
+        # nothing against a forward pass, and without them "captioning is slow"
+        # is a feeling rather than a measurement.
+        self.calls = 0
+        self.rows = 0
+        self.seconds = 0.0
+        self.enforcer_seconds = 0.0
+
+    def reset(self) -> None:
+        self.calls = self.rows = 0
+        self.seconds = self.enforcer_seconds = 0.0
 
     def __call__(self, input_ids, scores):
         import torch
+
+        started = time.perf_counter()
+        self.calls += 1
+        self.rows += input_ids.shape[0]
 
         cap = self.captioner
         vocab = scores.shape[-1]
@@ -336,7 +501,11 @@ class CaptionLogitsProcessor:
         for row in range(input_ids.shape[0]):
             # Only the generated suffix is JSON; the prompt is not.
             generated = input_ids[row, cap._prompt_len:].tolist()
+            # Timed separately: this is the pure-Python part, and whether it
+            # dominates decides whether the fix is the enforcer or the GPU.
+            _t = time.perf_counter()
             packed = cap._enforcer.get_allowed_tokens(generated).allowed_tokens
+            self.enforcer_seconds += time.perf_counter() - _t
             packed = packed.to(scores.device)
             bits = ((packed.unsqueeze(1) >> self._bits) & 1).bool().flatten()
             # The logit width can exceed the tokenizer's vocabulary: models pad
@@ -345,7 +514,76 @@ class CaptionLogitsProcessor:
             n = min(bits.numel(), vocab)
             mask[row, :n] = bits[:n]
 
+        self.seconds += time.perf_counter() - started
+
         return scores.masked_fill(~mask, float("-inf"))
+
+
+# Words that leave a caption hanging when the text is cut after them. Trimming
+# a severed word off "...pours it into a glass and" leaves the "and" dangling,
+# which reads worse than the fragment did. Copulas and bare articles behave the
+# same way: "...and the treehouse is" wants the "is" gone too.
+_DANGLING = frozenset("""
+a an the and or but then while as with of to in on at by for from into onto
+before after that which who whose near over under behind toward towards
+is are was were be been being has have had its his her their this these those
+""".split())
+
+_SEPARATORS = " ,;:-\u2013\u2014"
+
+
+def tidy_caption(text: str | None) -> str | None:
+    """Close off a caption that the decoder cut short.
+
+    The schema ceiling ends the string wherever the budget runs out, mid-word if
+    that is where it lands. A cut caption is still worth keeping -- almost all of
+    the content is there -- so this drops the severed tail rather than the whole
+    sentence, which is what trimming back to the last full stop would cost.
+
+    Captions under the ceiling are complete already; the model just tends to omit
+    the closing full stop, so they only get the punctuation.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if text[-1] in ".!?":
+        return text
+
+    # Only a caption at the ceiling was cut; anything shorter ended by choice.
+    cut = len(text) >= CAPTION_MAX_CHARS - 2
+    if cut and text[-1] not in _SEPARATORS:
+        # Ending on a separator proves the last word finished before the cut.
+        # Ending on a letter proves nothing, and half a word ("...the animals
+        # are now visible, ccc") is worse in the index than a missing one.
+        head = text.rpartition(" ")[0]
+        text = head or text
+
+    words = text.rstrip(_SEPARATORS).split()
+    # Never strip a caption down to a stub chasing a tidy ending -- past a few
+    # words the dangling tail costs less than the content would.
+    while len(words) > 3 and words[-1].lower().strip(_SEPARATORS) in _DANGLING:
+        words.pop()
+    text = " ".join(words).rstrip(_SEPARATORS)
+    if not text:
+        return None
+    return _drop_orphan(text + ".") if cut else text + "."
+
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?]) +")
+
+
+def _drop_orphan(text: str) -> str:
+    """Discard a final sentence the cut reduced to a stub.
+
+    When the ceiling lands just after the model starts a new sentence, closing
+    it yields an orphan -- "...about football. The time stamp." Those few words
+    carry no event and the embedding is better without them. Only a short tail
+    goes: a long final clause is content, however abruptly it ends.
+    """
+    parts = _SENTENCE_BREAK.split(text)
+    if len(parts) > 1 and len(parts[-1].split()) < 4:
+        return " ".join(parts[:-1])
+    return text
 
 
 def parse_caption(text: str) -> dict:
@@ -376,7 +614,7 @@ def parse_caption(text: str) -> dict:
             return [str(v).strip() for v in value if str(v).strip()]
         return [str(value).strip()] if value else []
 
-    caption = str(data.get("caption") or "").strip() or None
+    caption = tidy_caption(str(data.get("caption") or ""))
     setting = str(data.get("setting") or "").strip() or None
     return {
         "caption": caption,

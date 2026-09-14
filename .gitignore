@@ -1,6 +1,11 @@
 .venv/
 data/
 scratch/
+# Model weights staged for upload to Kaggle. Gigabytes, and reproducible
+# from Hugging Face with scripts/fetch_models.py.
+models/*
+!models/README.md
+!models/*/dataset-metadata.json
 bin/
 *.pyc
 __pycache__/
@@ -8,10 +13,10 @@ __pycache__/
 web/node_modules/
 web/dist/
 
-# Kept out of the repo: everything that exists to measure or bulk-load the
-# QVHighlights corpus, plus the test suite. These are development scaffolding
-# for a corpus that is being replaced, not part of what the project ships.
+# Kept out of the repo: the test suite and the corpus loader. Development
+# scaffolding, not part of what the project ships. The QVHighlights eval
+# harness that used to be listed here is gone -- the corpus it measured was
+# deleted, so the code went with it.
 tests/
-python/eval/
 eval/
 scripts/

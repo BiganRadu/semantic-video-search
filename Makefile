@@ -4,7 +4,22 @@ DB_CONTAINER ?= vs-postgres
 DB_PORT      ?= 5433
 DB_IMAGE     ?= pgvector/pgvector:pg16
 DB_VOLUME    ?= vs-pgdata
-DATABASE_URL ?= postgres://video:video@localhost:$(DB_PORT)/video?sslmode=disable
+# Local secrets: GEMINI_API_KEY for query planning, AIVEN_DATABASE_URL for the
+# hosted database. Gitignored. The key is optional -- without it, search runs on
+# the measured default weights and nothing breaks.
+-include .env
+export GEMINI_API_KEY
+
+# Which database every target talks to. `make run DB=aiven` uses the hosted one,
+# anything else the local container. Search against Aiven measured ~2x the local
+# latency (median 566ms vs 285ms, network round-trips), so local stays the
+# default for development and Aiven is what the deployment points at.
+DB ?= local
+ifeq ($(DB),aiven)
+  DATABASE_URL ?= $(AIVEN_DATABASE_URL)
+else
+  DATABASE_URL ?= postgres://video:video@localhost:$(DB_PORT)/video?sslmode=disable
+endif
 export DATABASE_URL
 
 # The project lives on an NTFS/FUSE mount, which is slow and unreliable for a
@@ -73,22 +88,13 @@ web-dev: ## frontend dev server with hot reload (proxies /api to :8080)
 search: ## one-shot query from the CLI, bypassing the server
 	@$(PY) python/search.py --query "$(Q)" -k $(or $(K),10)
 
-## ---- data & evaluation ----------------------------------------------------
+## ---- corpus ---------------------------------------------------------------
 
-data: ## download QVHighlights annotations + dev corpora
-	@$(PY) python/eval/fetch_data.py
+corpus: ## index one demo video (NAME=travel_japan); no NAME lists them
+	@$(PY) scripts/corpus.py $(NAME)
 
-index: ## bulk-index a corpus, one time (CORPUS=dev10|dev100)
-	@$(PY) scripts/qvhighlights.py --corpus $(or $(CORPUS),dev10)
-
-tune: ## tune fusion weights on the train split (never on the reported corpus)
-	@$(PY) python/eval/tune_weights.py --corpus $(or $(CORPUS),train100)
-
-eval: ## measure retrieval (CORPUS=, SIGNALS=, SCOPE=corpus|video|both)
-	@$(PY) python/eval/run_eval.py \
-	  --corpus $(or $(CORPUS),dev100) \
-	  --signals $(or $(SIGNALS),visual) \
-	  --scope $(or $(SCOPE),corpus)
+models: ## download model weights into models/ for upload to Kaggle (ONLY=search|index)
+	@$(PY) scripts/fetch_models.py $(if $(ONLY),--only $(ONLY))
 
 ## ---- code -----------------------------------------------------------------
 

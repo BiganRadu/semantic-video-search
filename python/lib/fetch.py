@@ -15,6 +15,8 @@ and the search path never pull it in.
 """
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import sys
 import time
@@ -24,6 +26,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from python.lib.config import MAX_SOURCE_DURATION, SCRATCH
+
+# Goes to stderr with the rest of the pipeline's logging: index.py's
+# stdout carries the JSON protocol and must stay clean.
+log = logging.getLogger(__name__)
 
 # How long an abandoned download may sit before the next fetch clears it. Long
 # enough that a download still running is never mistaken for a dead one.
@@ -35,7 +41,38 @@ ALLOWED_SCHEMES = ("http", "https")
 
 # Cap the stream so an accidental 4K submission does not spend an hour of GPU
 # time. 1080p is already far above what SigLIP sees at 384px.
-FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+# 720p, not 1080p. Frames are downscaled to 384px for SigLIP and the captioner
+# reads a handful per clip, so the extra pixels are decoded and thrown away --
+# they cost download time and disk on a free-tier box for no retrieval gain.
+FORMAT = ("bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+          "best[height<=720][ext=mp4]/best")
+
+# YouTube serves different player APIs to different clients, and rejects some of
+# them as bot traffic depending on the IP -- a datacentre address (Kaggle, any
+# host) gets refused far more often than a home one. No single client works
+# everywhere, so each is tried in turn until one yields a download.
+#
+# Order matters: ios and web_safari succeed most often and cost nothing to try
+# first; the bare default is last because when the others are being refused it
+# is the one most likely to be refused too.
+CLIENT_STRATEGIES: list[tuple[str, dict]] = [
+    ("ios", {"player_client": ["ios"]}),
+    ("web_safari", {"player_client": ["web_safari"]}),
+    ("tv", {"player_client": ["tv"]}),
+    ("mweb", {"player_client": ["mweb"]}),
+    ("android_embedded", {"player_client": ["android_embedded", "web"]}),
+    ("default", {}),
+]
+
+
+def _with_client(options: dict, extractor: dict) -> dict:
+    """Copy options, pointing the YouTube extractor at one player client."""
+    out = dict(options)
+    if extractor:
+        args = dict(out.get("extractor_args") or {})
+        args["youtube"] = {**args.get("youtube", {}), **extractor}
+        out["extractor_args"] = args
+    return out
 
 
 class FetchError(RuntimeError):
@@ -68,8 +105,18 @@ class _Logger:
 
 # Shared by probe and fetch, so the two cannot drift apart on the settings that
 # matter: no playlists, nothing on stdout.
+# A Netscape cookies.txt, if one is available.
+#
+# From a home address the client fallback above is usually enough. From a
+# datacentre -- Kaggle, or any host -- YouTube refuses far more aggressively
+# and eventually answers every client with "Sign in to confirm you're not a
+# bot", which no choice of player gets past. Cookies are the documented way
+# through, and the only one that does not involve a proxy.
+COOKIES = os.environ.get("YTDLP_COOKIES", "")
+
+
 def _options(**extra) -> dict:
-    return {
+    options = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,      # our own hook reports progress, in JSON
@@ -77,6 +124,9 @@ def _options(**extra) -> dict:
         "noplaylist": True,      # a playlist link means its first video, not 200
         **extra,
     }
+    if COOKIES and Path(COOKIES).is_file():
+        options["cookiefile"] = COOKIES
+    return options
 
 
 @dataclass(slots=True)
@@ -122,12 +172,20 @@ def probe(url: str) -> dict:
     import yt_dlp
 
     url = check_url(url)
-    options = _options(skip_download=True)
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as exc:
-        raise FetchError(f"could not read that link: {_reason(exc)}") from exc
+    base = _options(skip_download=True)
+
+    info, last = None, None
+    for name, extractor in CLIENT_STRATEGIES:
+        try:
+            with yt_dlp.YoutubeDL(_with_client(base, extractor)) as ydl:
+                info = ydl.extract_info(url, download=False)
+            log.debug("probe succeeded with client strategy %s", name)
+            break
+        except Exception as exc:
+            log.info("probe: client %s refused (%s)", name, _reason(exc))
+            last = exc
+    if info is None:
+        raise FetchError(f"could not read that link: {_reason(last)}") from last
 
     if info.get("_type") == "playlist":
         entries = [e for e in (info.get("entries") or []) if e]
@@ -168,7 +226,7 @@ def fetch(url: str, video_id: str, on_progress=None) -> Fetched:
         # items, and "download 41/100" reads better than "download 8.4e6/2.0e7".
         on_progress("download", int(100 * got / total) if total else 0, 100)
 
-    options = _options(
+    base = _options(
         format=FORMAT,
         outtmpl=str(work / "source.%(ext)s"),
         merge_output_format="mp4",
@@ -176,17 +234,32 @@ def fetch(url: str, video_id: str, on_progress=None) -> Fetched:
         retries=3,
         concurrent_fragment_downloads=4,
     )
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([url])
-    except Exception as exc:
-        shutil.rmtree(work, ignore_errors=True)
-        raise FetchError(f"download failed: {_reason(exc)}") from exc
+
+    # A refusal is per-client, not per-video, so a failure here is worth
+    # retrying with a different player rather than reporting to the user.
+    # Partial files from a refused attempt are cleared before the next, or
+    # yt-dlp resumes a truncated download from the wrong client's format.
+    last = None
+    for name, extractor in CLIENT_STRATEGIES:
+        try:
+            with yt_dlp.YoutubeDL(_with_client(base, extractor)) as ydl:
+                ydl.download([url])
+        except Exception as exc:
+            log.info("download: client %s refused (%s)", name, _reason(exc))
+            last = exc
+            for stale in work.iterdir():
+                stale.unlink(missing_ok=True)
+            continue
+        if any(p.is_file() for p in work.iterdir()):
+            log.info("download succeeded with client strategy %s", name)
+            break
+        last = last or FetchError("download produced no file")
 
     files = sorted(p for p in work.iterdir() if p.is_file())
     if not files:
         shutil.rmtree(work, ignore_errors=True)
-        raise FetchError("download produced no file")
+        raise FetchError(f"download failed: {_reason(last)}" if last
+                         else "download produced no file")
 
     return Fetched(
         path=max(files, key=lambda p: p.stat().st_size),

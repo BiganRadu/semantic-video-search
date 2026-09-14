@@ -24,6 +24,11 @@ faster-whisper            # bundles Silero VAD
 # URL and gets clips back, and never sees the bytes.
 yt-dlp
 
+# --- query routing --------------------------------------------------------
+# The OpenAI client, pointed at Gemini's OpenAI-compatible endpoint. Used only
+# to plan a query; search works without it, and without a key.
+openai
+
 # --- data -----------------------------------------------------------------
 numpy
 pillow

@@ -140,6 +140,13 @@ def index_video(source: Path, video_id: str, *, models=None, keep_frames: bool =
         from python.lib.indexing import Captioner, tags_text
         from python.lib.config import CAPTION_BATCH, CAPTION_FRAMES
 
+        # Give the captioner the whole card. SigLIP and Whisper have both
+        # finished by here and would otherwise sit in VRAM through the longest
+        # stage of the run -- which on a 15 GB card forces a smaller batch, and
+        # a smaller batch is proportionally more generate() calls for the same
+        # video. bge is kept: caption embedding needs it a few lines below.
+        models.release("siglip", "whisper")
+
         progress("caption", 0, len(clips))
         captions: list[dict] = []
         for start in range(0, len(clips), CAPTION_BATCH):
@@ -282,6 +289,47 @@ def main() -> int:
         return _main()
 
 
+def _remote(url: str, video_id: str) -> int:
+    """Hand the whole pipeline to a Kaggle kernel.
+
+    The kernel writes its clips and vectors to the database directly and
+    returns only a summary: a 40-minute video produces ~15k frame embeddings,
+    which is megabytes of base64 to push back through a notebook log for no
+    reason when both ends can already reach the same database.
+
+    Progress is coarse -- Kaggle's log is unreadable until the kernel exits, so
+    the only honest thing to report is that it is still going.
+    """
+    from python.lib.config import DATABASE_URL, GEMINI_API_KEY
+    from python.lib.remote import Job, RemoteError, run
+
+    job = Job(kind="index", gpu=True, payload={
+        "url": url, "video_id": video_id, "source": "user",
+        "database_url": DATABASE_URL, "gemini_api_key": GEMINI_API_KEY,
+    })
+
+    def progress(stage, done=0, total=0):
+        emit(event="progress", stage=stage, done=done, total=total)
+
+    try:
+        result = run(job, on_progress=progress)
+    except RemoteError as exc:
+        emit(event="error", message=str(exc))
+        return 1
+
+    if not result.get("ok"):
+        emit(event="error", message=result.get("error", "the job reported no result"))
+        return 1
+
+    # The row is already written. Go is told what happened, not handed the data
+    # to write again.
+    emit(event="result", remote=True, video={
+        "id": result["video_id"], "title": result.get("title"),
+        "duration_s": result.get("duration_s"), "locator": result.get("locator"),
+    }, stats=result.get("stats", {}))
+    return 0
+
+
 def _main() -> int:
     ap = argparse.ArgumentParser(description="Index one video into searchable data.")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -289,7 +337,16 @@ def _main() -> int:
     src.add_argument("--source", help="path to a video file already on disk")
     ap.add_argument("--video-id", required=True, help="stable id, also the database key")
     ap.add_argument("--keep-frames", action="store_true", help="leave extracted frames on disk")
+    ap.add_argument("--remote", action="store_true",
+                    help="run the whole pipeline on Kaggle instead of this machine")
     args = ap.parse_args()
+
+    if args.remote:
+        if not args.url:
+            emit(event="error", message="--remote needs --url: the kernel fetches "
+                                        "the video itself and cannot see local files")
+            return 1
+        return _remote(args.url, args.video_id)
 
     try:
         if args.url:

@@ -66,13 +66,27 @@ def extract_frames(src: Path, dest: Path, rate: float = FRAME_RATE,
     gives its timestamp arithmetically; no per-frame probing needed.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(src),
-         "-vf", f"fps={rate:g},scale={size}:{size}:flags=bicubic",
-         "-q:v", "3", "-fps_mode", "passthrough",
-         str(dest / "f_%05d.jpg")],
-        check=True, capture_output=True,
-    )
+    base = ["ffmpeg", "-v", "error", "-i", str(src),
+            "-vf", f"fps={rate:g},scale={size}:{size}:flags=bicubic", "-q:v", "3"]
+    out = str(dest / "f_%05d.jpg")
+
+    # -fps_mode arrived in ffmpeg 5.0; older builds -- Kaggle's image among them
+    # -- want the -vsync spelling and reject the new one outright. Try the
+    # current flag, fall back rather than requiring a particular ffmpeg.
+    attempts = [base + ["-fps_mode", "passthrough", out],
+                base + ["-vsync", "passthrough", out]]
+    last = None
+    for cmd in attempts:
+        done = subprocess.run(cmd, capture_output=True)
+        if done.returncode == 0:
+            break
+        last = done
+    else:
+        # capture_output hides ffmpeg's reason, and "exit status 1" is not a
+        # diagnosis -- this failed on Kaggle once and said nothing useful.
+        raise RuntimeError(
+            f"ffmpeg could not extract frames from {src.name}: "
+            f"{(last.stderr or b'').decode(errors='replace').strip()[:400]}")
     files = sorted(dest.glob("f_*.jpg"))
     if not files:
         raise ValueError(f"{src.name}: ffmpeg produced no frames")
