@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Search the index.
 
-Go starts this script once at boot and talks to it over stdin/stdout: one JSON
-request per line in, one JSON response per line out. It stays warm because a
-cold start costs about 9.5 seconds -- 1.4s to import torch, 3.5s transformers,
-4.1s for the first forward pass -- which would otherwise be paid on every
-single query.
+Go runs this once and talks to it over stdin/stdout: one JSON request per line
+in, one response per line out. It stays warm because loading the encoders costs
+far more than answering a query.
 
     >>> {"q": "a person walking a dog", "k": 10}
     <<< {"ok": true, "results": [...], "corpus": {...}, "took_ms": 14.2}
 
-Results are *moments*, not clips: adjacent clips of one video that all matched
-are assembled back into the span they cover, so one event appears once.
+Results are *moments*, not clips: adjacent matching clips of one video are
+assembled into the span they cover, so one event appears once.
 
 Also runs one-shot for debugging:  python/search.py --query "a red car"
 """
@@ -38,134 +36,67 @@ CANDIDATE_DEPTH = 200
 KNOWN = ("visual", "caption", "speech", "keyword")
 IMPLEMENTED = ("visual", "caption", "speech", "keyword")
 
-# How many results a page shows, by scope, when the caller does not say.
-#
-# A within-video search answers "where in this video", and three timestamps is
-# an answer -- twenty is the video handed back. Corpus search shows more because
-# breadth is the point there. The relevance floor can still return fewer, and
-# often should: "nothing here matches" is a real answer.
+# Results per page, by scope. A within-video search wants a few timestamps; a
+# corpus search wants breadth. The relevance floor can still return fewer.
 DEFAULT_K = {"corpus": 8, "video": 3}
 
 # Damping constant from the original reciprocal-rank-fusion paper. Not tuned.
 RRF_K = 60.0
 
-# Per-signal fusion weights.
+# Per-signal fusion weights. Not optional: unweighted RRF gives a near-useless
+# signal an equal vote, which displaces good results rather than adding to them.
 #
-# These are NOT optional. Unweighted RRF gives every signal an equal vote, so a
-# clip ranked first by a near-useless signal outranks nothing -- it actively
-# displaces one ranked first by a good signal. Measured on dev100, unweighted
-# fusion of all three signals scored R@1 0.270 against 0.658 for visual alone.
-#
-# A weight of 0 disables a signal's contribution without removing it from the
-# response, which is useful for seeing what a signal *would* have retrieved.
-#
-# These values are MEASURED, not guessed: a 64-point sweep on the QVHighlights
-# train split (140 queries, held out from everything reported) put the optimum
-# at speech=0 and keyword=0. Every non-zero weight scored worse on nDCG@10.
-# See eval/reports/weights_train100.json.
-#
-# That is a statement about QVHighlights, not about speech in general. Its
-# queries describe what is visible ("a girl is showing her hotel room") while
-# the audio is unrelated vlog chatter, so transcript matching only adds noise.
-# On footage where people say what they are doing -- meetings, lectures,
-# security audio -- the tuning would land somewhere else. Retune per corpus.
-# caption starts at 1.0 pending its own sweep; the others are the measured
-# optimum from the pre-caption tuning run.
+# A weight of 0 keeps the signal in the response without letting it affect the
+# ranking. These values suit footage whose queries describe what is visible;
+# corpora where people say what they are doing want a different balance.
 DEFAULT_WEIGHTS = {"visual": 1.0, "caption": 1.0, "speech": 0.0, "keyword": 0.0}
 
 # -- moment assembly ---------------------------------------------------------
 #
-# Retrieval scores 10s clips because that is the granularity the models see, but
-# a clip is not what anyone searched for. One event -- someone carrying a box out
-# of a door -- spans several clips and every one of them matches, so an
-# unassembled page shows the same event five times and pushes the rest of the
-# corpus off it. Assembly merges adjacent retrieved clips of one video back into
-# the span they actually cover, and ranks spans instead of clips.
+# Retrieval scores 10s clips because that is what the models see, but one event
+# spans several of them and every one matches. Assembly merges adjacent
+# retrieved clips of a video into the span they cover, and ranks spans.
 
-# Largest hole bridged when joining two retrieved clips. Measured inert at the
-# cap below -- bridging a 10s hole needs a 30s span and the cap is 20s -- so it
-# is off. It exists for corpora whose events run longer than this one's.
+# Largest hole bridged when joining two clips. Off: bridging one needs a span
+# longer than the cap allows. Useful for corpora with longer events.
 MOMENT_GAP = 0.0
 
-# A moment stops growing here, and this one is MEASURED. At 60s, moments came
-# back averaging 53.6s -- a third of a 150s video -- and scored *better* on "the
-# returned range touches a relevant window" while getting visibly worse, because
-# a long enough span touches something by accident. Against the stricter "half
-# the returned range is inside the window" it halved: R@1 0.279 -> 0.135.
-#
-# A 140-query sweep on the train split put every setting that holds retrieval
-# quality at 20s, and the ground truth says why: the median QVHighlights window
-# is 14s and 65% are 20s or shorter. An answer should be about as long as the
-# thing it is an answer to.
+# A moment stops growing here. A long span touches a relevant window by
+# accident, which flatters overlap metrics while getting worse in practice --
+# an answer should be about as long as the thing it answers.
 MOMENT_MAX_LEN = 20.0
 
 # What corroboration from the rest of a moment is worth. Clip scores are summed
-# in descending order under a geometric discount, so a moment's total is bounded
-# by peak / (1 - decay): supporting clips can lift a moment's rank, but length
-# alone can never win. At 0 a moment scores exactly its best clip and assembly
-# becomes pure de-duplication; 0.5 measured better than 0 on the train split
-# (R@1 0.586 against 0.543) at no cost to the strict metric.
+# in descending order under a geometric discount, so the total is bounded by
+# peak / (1 - decay): supporting clips lift a moment, length alone cannot win.
+# At 0 a moment scores its best clip and assembly is pure de-duplication.
 MOMENT_DECAY = 0.5
 
-# How strong a neighbouring clip must be, relative to the moment's peak, to be
-# absorbed into it. Without this a moment grows into every clip the candidate
-# pool happens to contain for that video, which at CANDIDATE_DEPTH=200 is most
-# of it -- and a span that long scores well on "touches a relevant window" for
-# the wrong reason. This is the parameter that keeps a moment tight.
-# Measured inert at a 20s cap -- a two-clip moment rarely has a second clip weak
-# enough to refuse -- and kept because it is what would hold a longer moment
-# together if the cap were raised. Values above 0.5 measured worse.
+# How strong a neighbour must be, relative to the peak, to join the moment.
+# Keeps a moment tight rather than letting it grow into the whole candidate
+# pool. Inert at the current cap; it matters if the cap is raised.
 MOMENT_FLOOR = 0.0
 
-# How many moments one video may hold on the page before the rest are pushed
-# below everything else. Merging alone does not fix a flooded page: a video with
-# three genuinely separate matching events legitimately produces three moments,
-# and on a 150s clip they are often the same event anyway. Demoted moments are
-# not dropped -- a page short of k fills back up from them in score order -- so
-# this changes the order of the answers, never which answers exist. 0 disables.
+# How many moments one video may hold before the rest are demoted. Merging
+# alone does not fix a flooded page. Demoted moments are not dropped -- a short
+# page fills back up from them -- so this changes order, not membership.
 MOMENT_PER_VIDEO = 2
 
-# Below these raw similarities, a moment is not a match and is not returned.
+# Below these raw similarities a moment is not a match and is not returned.
+# RRF ranks rather than measures, so within one video the top result scores the
+# same whatever the query; raw cosines do separate matches from nonsense.
 #
-# This exists because RRF scores rank, not similarity, and rank is meaningless
-# when there is nothing to lose to. Searching inside ONE video, every clip is in
-# the candidate list, so every clip gets a reciprocal rank and the top always
-# scores about 1/(RRF_K+1) -- whatever the query. Measured: "a man is talking"
-# and "zzzz nonsense qqq" against the same video returned 9 moments each, with
-# the same scores. The timeline lit up identically for both.
-#
-# The raw cosines do know the difference, and they separate cleanly. Over 40
-# QVHighlights queries against their own video, versus 40 random-letter queries
-# against those same videos:
-#
-#     caption   real 0.480-0.781 (median 0.649)   nonsense 0.280-0.403
-#     visual    real 0.103-0.229 (p10-max)        nonsense 0.013-0.092
-#
-# caption does not overlap at all. The floors sit just above what nonsense
-# reached, so a real match is kept and a non-match is dropped.
-#
-# A moment survives if ANY signal clears its own floor -- one strong signal is
-# enough, and the scales are not comparable to each other.
-#
-# keyword has no floor: ts_rank_cd only scores rows that already matched the
-# tsquery, so the signal is its own filter.
+# A moment survives if ANY signal clears its floor. keyword has none: it only
+# scores rows that already matched, so it filters itself.
 MIN_RELEVANCE = {"visual": 0.09, "caption": 0.42, "speech": 0.42, "keyword": 0.0}
 
-# The other end of the same measurement: what a strong match actually scores.
-# These are the p90 of real queries against their own video, from the same run.
-# Together with MIN_RELEVANCE they turn a raw cosine into a 0..1 confidence
-# that means the same thing across signals whose scales do not compare --
-# 0 is "no better than nonsense", 1 is "as good as this signal gets".
-#
-# This is what the interface should show, not the fusion score. RRF ranks; it
-# does not measure. Inside one video the top moment always scores about
-# 1/(RRF_K+1) whether or not anything matched, so a meter driven by it is a
-# meter that always reads full.
+# What a strong match scores, per signal. With MIN_RELEVANCE this turns a raw
+# cosine into a 0..1 confidence comparable across signals whose scales are not:
+# 0 is "no better than nonsense", 1 is "as good as this signal gets". This is
+# what an interface should show, not the fusion score.
 MAX_RELEVANCE = {"visual": 0.17, "caption": 0.72, "speech": 0.72, "keyword": 1.0}
 
-# Clip boundaries come back from Postgres as floats and the last clip of a video
-# is a folded short tail, so adjacency is compared with a tolerance rather than
-# by equality.
+# Clip boundaries are floats, so adjacency is compared with a tolerance.
 EPS = 1e-6
 
 
@@ -359,19 +290,12 @@ class Searcher:
         """Literal matching over the generated tsvector.
 
         Embeddings blur, which is right for "someone leaves" ~ "exits through
-        the gate" and wrong for proper nouns, numbers and rare terms. This is
-        the branch that catches those.
+        the gate" and wrong for proper nouns, numbers and rare terms.
 
-        The terms are OR-ed, not AND-ed. websearch_to_tsquery and
-        plainto_tsquery both AND, which turns this into a filter: a natural
-        language query like "she talks about her hotel room" would demand one
-        clip containing every term and return nothing. As a signal feeding
-        fusion it should rank by how well a clip matches, so the lexemes are
-        extracted through to_tsvector -- which stems them and drops stop words
-        -- and joined with OR.
-
-        Going through to_tsvector also means no user input is ever concatenated
-        into a tsquery.
+        Terms are OR-ed, not AND-ed: the built-in tsquery helpers AND, which
+        turns a signal into a filter and returns nothing for a natural-language
+        query. Lexemes go through to_tsvector, which also means no user input
+        is ever concatenated into a tsquery.
         """
         where, scope_params = self.corpus_filter(scope)
         with self.conn.cursor() as cur:
@@ -450,19 +374,15 @@ class Searcher:
              weights: dict[str, float] | None = None) -> list[dict]:
         """Weighted Reciprocal Rank Fusion.
 
-        RRF uses only rank, never score. SigLIP cosines, bge-m3 cosines and
-        ts_rank_cd sit on scales that are not comparable and that shift
-        whenever a model is swapped; a weighted sum of them would need
-        recalibrating every time. Rank fusion needs no calibration.
+        Uses only rank, never score: the signals sit on scales that are not
+        comparable and shift whenever a model is swapped, so a weighted sum
+        would need recalibrating each time. Rank fusion needs no calibration.
 
-        The weights are what stop a weak signal from outvoting a strong one --
-        see DEFAULT_WEIGHTS. With one signal the order is unchanged whatever the
-        weight, since 1/(k+rank) is monotone in rank. Raw per-signal scores are
-        carried through untouched.
+        Weights stop a weak signal outvoting a strong one; raw per-signal
+        scores are carried through untouched.
 
-        k=None returns the whole fused pool, which is what assembly consumes:
-        moments have to be built from every retrieved clip, because truncating
-        first would cut a moment off at the page boundary.
+        k=None returns the whole fused pool, which is what assembly needs --
+        truncating first would cut a moment off at the page boundary.
         """
         weights = weights or DEFAULT_WEIGHTS
         merged: dict[int, dict] = {}
@@ -495,27 +415,21 @@ class Searcher:
                  min_relevance: dict | None = None) -> list[dict]:
         """Merge adjacent retrieved clips of one video into ranked moments.
 
-        Greedy, seeded from the best clip outward: take the highest-scoring clip
-        no moment has claimed, then grow it towards whichever neighbour scores
-        better, stopping when the neighbours run out, a hole wider than `gap`
-        appears, or the span would exceed `max_len`.
+        Greedy, seeded from the best clip outward: take the highest-scoring
+        unclaimed clip, then grow towards the better neighbour until the
+        neighbours run out, a hole wider than `gap` appears, or the span would
+        exceed `max_len`.
 
-        Growing outward from the peak rather than merging runs left to right is
-        what makes the cap behave: whatever `max_len` cuts off is the weak end,
-        so a moment stays centred on its own evidence. And because seeds are
-        consumed in descending score order, a moment's seed is always its own
-        best clip and no clip can belong to two moments -- the property that
-        actually removes the duplicates.
+        Growing from the peak rather than left to right means whatever the cap
+        cuts is the weak end. Seeds are consumed in descending score order, so
+        no clip belongs to two moments -- which is what removes the duplicates.
 
         A neighbour also has to be worth absorbing: `floor` is the fraction of
-        the peak's score it must reach. Without it a moment swallows every clip
-        of its video that appears anywhere in the candidate pool, and a span
-        that long scores well on "touches a relevant window" for the wrong
-        reason -- which is exactly the kind of improvement this project is
-        supposed to catch rather than report.
+        the peak's score it must reach, without which a moment swallows every
+        clip of its video in the candidate pool.
 
-        Assembly only ever reorders and groups what fusion retrieved. It cannot
-        introduce a clip no signal matched, so it cannot manufacture a hit.
+        Assembly only reorders and groups what fusion retrieved, so it cannot
+        introduce a clip no signal matched.
         """
         by_video: dict[str, list[dict]] = {}
         for clip in fused:
@@ -800,15 +714,11 @@ class Searcher:
 class RemoteSearcher:
     """Answers the same protocol by running each query on Kaggle.
 
-    Exists because the deployment has no RAM for the encoders -- not even the
-    two that search needs. It is slow: one Kaggle kernel per query, minutes
-    rather than milliseconds. That is the cost of the free tier, and it is
-    visible to the caller only as latency.
+    For hosts with no RAM for the encoders. One kernel per query, so it costs
+    minutes rather than milliseconds; the caller sees only latency.
 
-    Only one query runs at a time. Kaggle allows very few concurrent kernels
-    per account, and a second push while the first is running gets queued
-    behind it anyway -- the lock makes the wait explicit instead of turning it
-    into a pile of pending kernels.
+    One query at a time: concurrent kernels are limited per account, and a
+    second push would queue behind the first anyway.
     """
 
     def __init__(self):

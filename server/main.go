@@ -49,7 +49,7 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
-	addr := flag.String("addr", envOr("ADDR", "127.0.0.1:8080"), "listen address")
+	addr := flag.String("addr", defaultAddr(), "listen address")
 	dsn := flag.String("dsn", envOr("DATABASE_URL", ""), "postgres connection string")
 	python := flag.String("python", envOr("PYTHON", defaultPython()), "python interpreter")
 	pyDir := flag.String("python-dir", envOr("PYTHON_DIR", "python"), "directory holding index.py and search.py")
@@ -158,6 +158,16 @@ func defaultPython() string {
 		}
 	}
 	return "python3"
+}
+
+// defaultAddr binds where the host expects. Platforms that assign a port set
+// PORT and require 0.0.0.0; local runs stay on loopback so a dev server is not
+// exposed to the network by accident.
+func defaultAddr() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return "0.0.0.0:" + port
+	}
+	return envOr("ADDR", "127.0.0.1:8080")
 }
 
 func envOr(k, def string) string {

@@ -1,35 +1,26 @@
-"""Plan a query before searching: what is it asking for, and how should it be
-phrased for each index.
+"""Plan a query before searching: what it is asking for, and how to phrase it
+for each index.
 
-Two problems, one model call.
+Two things from one model call.
 
-**Routing.** A single global weight vector cannot serve every query. "a woman
+**Routing.** One global weight vector cannot serve every query. "a woman
 talking to the camera" is answered by the pixels; "a woman explaining why she
-quit her job" is answered by the transcript. Speech sat at weight 0 because that
-is what a sweep found on QVHighlights, so transcripts on 73% of clips were dead
-weight.
+quit" is answered by the transcript. The class picks the fusion weights.
 
-**Rewriting.** Every index is searched by embedding text and comparing vectors,
-so the query should look like the thing it is being compared against -- and that
-is a *different* text for each index:
+**Rewriting.** Each index is searched by embedding text, so the query should
+look like what it is compared against -- a different text per index:
 
-    "find me the part where the guy in the blue shirt jumps off the wall"
+    "the part where the guy in the blue shirt jumps off the wall"
       visual   -> "a man in a blue shirt jumping off a wall"
       caption  -> "A man wearing a blue shirt leaps from the top of a wall."
       keywords -> ["blue shirt", "wall", "jump"]
 
-    "a woman explains why she quit her job"
-      speech   -> "I quit my job because I felt undervalued and wanted more."
+Speech is the interesting one: a transcript holds what someone *said*, not a
+description of them saying it, so the useful thing to embed is a hypothetical
+utterance (HyDE) rather than the query itself.
 
-The speech rewrite is the interesting one: the transcript contains what a person
-*said*, not a description of them saying it, so the useful thing to embed is a
-hypothetical utterance rather than the query. Searching for a guessed answer
-instead of the question is an old trick (HyDE) and it is exactly the mismatch
-speech retrieval suffers from here.
-
-The call is synchronous and uncached, by request. It is bounded by a timeout and
-every failure degrades to the raw query with the measured default weights, so a
-dead endpoint slows search down but never breaks it.
+Bounded by a timeout, and every failure degrades to the raw query with the
+default weights -- a dead endpoint slows search but never breaks it.
 """
 from __future__ import annotations
 
@@ -42,25 +33,14 @@ from dataclasses import dataclass, field
 from python.lib.config import (GEMINI_API_KEY, INTENT_BASE_URL, INTENT_MODEL,
                                INTENT_TIMEOUT)
 
-# What each class does to the fusion weights.
+# What each class does to the fusion weights. Starting points rather than
+# measured results, with one exception.
 #
-# Mostly ASSERTED, not measured -- unlike DEFAULT_WEIGHTS, which came out of a
-# 216-point sweep. There is no corpus yet where speech should win: on
-# QVHighlights the queries describe what is visible and speech measured R@1
-# 0.081 alone, so a sweep there would only rediscover "always visual". Treat
-# these as considered starting points, not results.
-#
-# One of them is not a guess, though. **caption is 0 on a speech query, and it
-# has to be.** `caption_vec` embeds the caption plus its flattened tags, and
-# both are written by the vision model from frames alone -- it never hears the
-# audio. A caption therefore cannot contain what anyone said, so on a query
-# about what was said it can only contribute noise dressed as agreement, and
-# under RRF a confident wrong vote displaces a correct one.
-#
-# keyword survives on a speech query for the opposite reason: clips.fts is
-# generated over caption (weight A), tags (B) AND speech (C), so it is the one
-# literal path into the transcript -- which is what catches the proper nouns,
-# numbers and rare terms that embeddings blur.
+# caption is 0 on a speech query and has to be: caption_vec is written by the
+# vision model from frames alone, so it cannot contain what anyone said and can
+# only contribute confident noise. keyword survives for the opposite reason --
+# clips.fts covers speech as well, making it the one literal path into the
+# transcript.
 PROFILES = {
     "visual": {"visual": 1.0, "caption": 1.0, "speech": 0.0, "keyword": 0.0},
     "speech": {"visual": 0.0, "caption": 0.0, "speech": 1.0, "keyword": 0.5},

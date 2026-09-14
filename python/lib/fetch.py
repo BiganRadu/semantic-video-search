@@ -27,8 +27,7 @@ from urllib.parse import urlparse
 
 from python.lib.config import MAX_SOURCE_DURATION, SCRATCH
 
-# Goes to stderr with the rest of the pipeline's logging: index.py's
-# stdout carries the JSON protocol and must stay clean.
+# stderr: index.py's stdout carries the JSON protocol and must stay clean.
 log = logging.getLogger(__name__)
 
 # How long an abandoned download may sit before the next fetch clears it. Long
@@ -41,20 +40,14 @@ ALLOWED_SCHEMES = ("http", "https")
 
 # Cap the stream so an accidental 4K submission does not spend an hour of GPU
 # time. 1080p is already far above what SigLIP sees at 384px.
-# 720p, not 1080p. Frames are downscaled to 384px for SigLIP and the captioner
-# reads a handful per clip, so the extra pixels are decoded and thrown away --
-# they cost download time and disk on a free-tier box for no retrieval gain.
+# 720p: frames are downscaled to 384px anyway, so higher resolution costs
+# download time and disk for no retrieval gain.
 FORMAT = ("bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
           "best[height<=720][ext=mp4]/best")
 
-# YouTube serves different player APIs to different clients, and rejects some of
-# them as bot traffic depending on the IP -- a datacentre address (Kaggle, any
-# host) gets refused far more often than a home one. No single client works
-# everywhere, so each is tried in turn until one yields a download.
-#
-# Order matters: ios and web_safari succeed most often and cost nothing to try
-# first; the bare default is last because when the others are being refused it
-# is the one most likely to be refused too.
+# YouTube serves different player APIs per client and refuses some as bot
+# traffic depending on the address. No single client works everywhere, so each
+# is tried in turn, most reliable first.
 CLIENT_STRATEGIES: list[tuple[str, dict]] = [
     ("ios", {"player_client": ["ios"]}),
     ("web_safari", {"player_client": ["web_safari"]}),
@@ -105,13 +98,8 @@ class _Logger:
 
 # Shared by probe and fetch, so the two cannot drift apart on the settings that
 # matter: no playlists, nothing on stdout.
-# A Netscape cookies.txt, if one is available.
-#
-# From a home address the client fallback above is usually enough. From a
-# datacentre -- Kaggle, or any host -- YouTube refuses far more aggressively
-# and eventually answers every client with "Sign in to confirm you're not a
-# bot", which no choice of player gets past. Cookies are the documented way
-# through, and the only one that does not involve a proxy.
+# A Netscape cookies.txt, if one is available. The client fallback above
+# handles most refusals; a bot challenge needs cookies.
 COOKIES = os.environ.get("YTDLP_COOKIES", "")
 
 
@@ -235,10 +223,9 @@ def fetch(url: str, video_id: str, on_progress=None) -> Fetched:
         concurrent_fragment_downloads=4,
     )
 
-    # A refusal is per-client, not per-video, so a failure here is worth
-    # retrying with a different player rather than reporting to the user.
-    # Partial files from a refused attempt are cleared before the next, or
-    # yt-dlp resumes a truncated download from the wrong client's format.
+    # A refusal is per-client, so it is worth retrying with another player.
+    # Partial files are cleared first, or yt-dlp resumes a truncated download
+    # from the previous client's format.
     last = None
     for name, extractor in CLIENT_STRATEGIES:
         try:

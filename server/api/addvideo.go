@@ -17,9 +17,8 @@ import (
 	"videosearch/server/store"
 )
 
-// Indexing runs at roughly a minute of GPU per minute of video and the source
-// duration is already capped, so this bounds a hung yt-dlp or a wedged model
-// load rather than a slow video.
+// Bounds a hung download or a wedged model load; source duration is capped
+// separately, so this is not what limits a long video.
 const indexTimeout = 2 * time.Hour
 
 type addVideoRequest struct {
@@ -29,12 +28,10 @@ type addVideoRequest struct {
 
 // apiAddVideo hands a link to index.py and writes back what comes out.
 //
-// Go does not fetch the video. index.py resolves the link with yt-dlp,
-// downloads it, indexes it and deletes the bytes, then returns the clips along
-// with the locator pointing at wherever the video already lives. Doing it here
-// instead would mean two places that know how to turn a link into a playable
-// stream -- and the one without yt-dlp would be the one deciding what gets
-// stored forever.
+// Go does not fetch the video: index.py resolves the link, downloads it,
+// indexes it and deletes the bytes, returning the clips and a locator pointing
+// at where the video already lives -- keeping one place that knows how to turn
+// a link into something playable.
 //
 // Progress streams back as server-sent events, so a video that takes minutes
 // shows what stage it is on rather than just hanging.

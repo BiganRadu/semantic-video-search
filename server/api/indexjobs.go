@@ -7,24 +7,18 @@ import (
 	"videosearch/server/pyproc"
 )
 
-// Index jobs: detached from the request that started them, and run one at a
+// Index jobs, detached from the request that started them and run one at a
 // time.
 //
-// Detached, because indexing used to run on the HTTP request's context, so
-// closing the tab cancelled it: the subprocess was killed mid-caption, no row
-// had been written yet, and the job vanished without an error anywhere. The
-// connection is a viewer of a job now, not its owner.
+// Detached because a connection is a viewer of a job, not its owner: closing
+// the tab must not kill work that has no other record until it finishes.
 //
-// One at a time, because the models do not share the GPU gracefully. Two
-// indexes at once means two copies of Qwen3-VL, SigLIP and Whisper resident
-// together, which is how a 24 GB card runs out of memory and fails both jobs
-// instead of finishing either. Serialising is also honest: the second video
-// was never going to be quicker for having started earlier.
+// One at a time because the models do not share a GPU gracefully -- two
+// indexes at once tend to fail both rather than finish either.
 
 const (
-	// How long a finished job stays visible after it ends. Long enough to see
-	// "done" on a page you come back to, short enough that the list is what is
-	// happening rather than a history.
+	// How long a finished job stays visible: long enough to see "done" on
+	// return, short enough that the list is not a history.
 	jobRetain = 30 * time.Minute
 )
 
@@ -77,14 +71,13 @@ func newJob(id, owner, title string) *job {
 	}
 }
 
-// emit records an event, updates the reportable status, and offers it to every
-// live subscriber.
+// emit records an event and offers it to every live subscriber.
 func (j *job) emit(ev any) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	// The status panel and the SSE stream read the same events; keeping one
-	// source avoids the two disagreeing about what stage a job is on.
+	// The status panel and the SSE stream read the same events, so they
+	// cannot disagree about what stage a job is on.
 	switch e := ev.(type) {
 	case pyproc.Event:
 		switch e.Event {
@@ -109,9 +102,8 @@ func (j *job) emit(ev any) {
 
 	j.history = append(j.history, ev)
 	for ch := range j.subs {
-		// Never block the indexer on a slow reader. A dropped progress tick
-		// costs nothing: the subscriber replays from history when it stops,
-		// so the record it ends up with is still complete.
+		// Never block the indexer on a slow reader; a dropped tick is
+		// recovered from history when the subscriber stops.
 		select {
 		case ch <- ev:
 		default:
@@ -135,7 +127,7 @@ func (j *job) finish() {
 	defer j.mu.Unlock()
 	j.finished, j.ended = true, time.Now()
 	if j.state != jobDone && j.state != jobFailed {
-		// Ended without a terminal event: the process died rather than failed.
+		// No terminal event means the process died rather than failed.
 		j.state = jobFailed
 		if j.errMsg == "" {
 			j.errMsg = "indexing stopped unexpectedly"
@@ -147,9 +139,8 @@ func (j *job) finish() {
 	j.subs = nil
 }
 
-// markRunning is set when the queue picks the job up, not when its first stage
-// arrives. Model loading takes a minute before anything is emitted, and a job
-// that is actually running must not still read as "queued" during it.
+// markRunning is set when the queue picks the job up, not when its first
+// stage arrives -- loading happens before anything is emitted.
 func (j *job) markRunning() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -226,9 +217,7 @@ func newJobs() *jobs {
 }
 
 // startOrAttach returns the job already handling this video, or enqueues one.
-//
-// The bool reports whether this call created it, which is the difference
-// between "queued for indexing" and "you are watching one already under way".
+// The bool reports whether this call created it.
 func (js *jobs) startOrAttach(id, owner, title string, run func(j *job)) (*job, bool) {
 	js.mu.Lock()
 	if existing, ok := js.m[id]; ok && !existing.isFinished() {
@@ -279,8 +268,7 @@ func (js *jobs) worker() {
 
 func (js *jobs) execute(j *job) {
 	defer func() {
-		// A panic in the indexer must still release the subscribers, or the
-		// page waits on a job that will never report anything again.
+		// A panic must still release subscribers, or the page waits forever.
 		if p := recover(); p != nil {
 			j.emit(map[string]any{"event": "error", "message": "indexing panicked"})
 		}
@@ -303,8 +291,8 @@ func (js *jobs) prune() {
 	}
 }
 
-// viewFor is one owner's jobs, newest first. Jobs are per-owner because the
-// panel is "what am I waiting on", not "what is the server doing".
+// viewFor is one owner's jobs, newest first: the panel answers "what am I
+// waiting on", not "what is the server doing".
 func (js *jobs) viewFor(owner string) []JobView {
 	js.mu.Lock()
 	defer js.mu.Unlock()
@@ -322,7 +310,7 @@ func (js *jobs) viewFor(owner string) []JobView {
 		}
 		out = append(out, j.view(place[j]))
 	}
-	// Newest first: the thing just submitted is the thing being watched.
+	// Newest first: what was just submitted is what is being watched.
 	for i := 0; i < len(out); i++ {
 		for k := i + 1; k < len(out); k++ {
 			if out[k].Started > out[i].Started {

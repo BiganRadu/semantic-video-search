@@ -292,13 +292,10 @@ def main() -> int:
 def _remote(url: str, video_id: str) -> int:
     """Hand the whole pipeline to a Kaggle kernel.
 
-    The kernel writes its clips and vectors to the database directly and
-    returns only a summary: a 40-minute video produces ~15k frame embeddings,
-    which is megabytes of base64 to push back through a notebook log for no
-    reason when both ends can already reach the same database.
-
-    Progress is coarse -- Kaggle's log is unreadable until the kernel exits, so
-    the only honest thing to report is that it is still going.
+    The kernel writes its own rows and returns a summary: the vectors are far
+    too large to send back through a notebook log when both ends already reach
+    the same database. Progress is coarse, since Kaggle's log is unreadable
+    until the kernel exits.
     """
     from python.lib.config import DATABASE_URL, GEMINI_API_KEY
     from python.lib.remote import Job, RemoteError, run

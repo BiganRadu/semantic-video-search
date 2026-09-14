@@ -186,13 +186,9 @@ func (s *Store) IndexedIDs(ctx context.Context) (map[string]bool, error) {
 }
 
 // ReleaseInterruptedIndexes clears rows left mid-index by a process that is no
-// longer running.
-//
-// Jobs live in memory, so a restart forgets them -- but the row they claimed
-// says 'indexing' forever, and the library shows a video that will never
-// finish and cannot be retried, because re-adding it finds the row already
-// there. Anything still marked indexing at startup was interrupted by
-// definition: this process has not begun any work yet.
+// longer running. Jobs live in memory, so anything still marked indexing at
+// startup was interrupted by definition -- otherwise the row says 'indexing'
+// forever and the video can never be retried.
 func (s *Store) ReleaseInterruptedIndexes(ctx context.Context) (int64, error) {
 	tag, err := s.Pool.Exec(ctx, `
 		UPDATE videos SET state = 'failed',
@@ -204,17 +200,11 @@ func (s *Store) ReleaseInterruptedIndexes(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// MarkIndexing claims the row before the work starts.
+// MarkIndexing claims the row before the work starts, so a job in flight is
+// visible and one that died is visible as stuck rather than absent.
 //
-// Without it an interrupted index leaves nothing at all: the row was only
-// written on success, so a job killed part-way through was indistinguishable
-// from one that never ran -- no record, no error, no trace. The placeholder
-// makes a job in flight visible, and a job that died visible as stuck rather
-// than as absent.
-//
-// Existing columns are left alone on conflict: re-adding a video that is
-// already indexed must not blank its clips or its title until the new run has
-// something to replace them with.
+// Existing columns survive a conflict: re-adding an indexed video must not
+// blank its title until the new run has something to replace it with.
 func (s *Store) MarkIndexing(ctx context.Context, id string, source, owner string,
 	expires *time.Time) error {
 	_, err := s.Pool.Exec(ctx, `

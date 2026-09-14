@@ -144,16 +144,11 @@ class IndexModels:
     def release(self, *names: str) -> None:
         """Drop models from VRAM once their stage is done.
 
-        Stages run in order, so by the time captioning starts SigLIP and
-        Whisper have finished and are only occupying memory the captioner
-        could be using. On a 24 GB card that slack is free and this does
-        nothing useful; on a 15 GB one it is the difference between captioning
-        a batch of 16 and a batch of 4 -- four times the generate() calls for
-        the same video.
-
+        Stages run in order, so a finished model is only occupying memory the
+        next stage could use -- which decides how large a caption batch fits.
         Reloading is a property away, so releasing something still needed
-        costs a load rather than an error. bge is deliberately easy to get
-        wrong here: caption embedding runs *after* captioning.
+        costs a load rather than an error. Note caption embedding runs *after*
+        captioning, so bge is not finished when the captioner starts.
         """
         import gc
 
@@ -173,19 +168,14 @@ class IndexModels:
             torch.cuda.empty_cache()
 
 
-# Lengths are part of the schema, not just the prompt. Constrained decoding
-# blocks EOS until the object is complete, so an unbounded string field means
-# the model elaborates until it hits the token limit and the JSON never closes.
-# Bounding the fields is what makes the output both valid and cheap.
+# Lengths belong in the schema, not just the prompt: constrained decoding
+# blocks EOS until the object is complete, so an unbounded field means the
+# model elaborates until the token limit and the JSON never closes.
 _SHORT_TEXT = {"type": "string", "maxLength": 90}
 
-# The ceiling is what actually bounds caption length: the model ignores the
-# prompt's request for two sentences and writes until something stops it. 400
-# was tried and reverted -- it bought no extra event description, only trailing
-# scenery ("a purple pillow is visible to her right") and, on one clip, a
-# verbatim repeated sentence. Both dilute the caption embedding. The event is
-# described in the first sentence or two; the rest is padding, so the budget
-# stays tight and tidy_caption repairs the ragged edge it leaves.
+# What actually bounds caption length: the model writes until something stops
+# it, and a longer allowance buys trailing scenery rather than more event.
+# Kept tight; tidy_caption repairs the ragged edge it leaves.
 CAPTION_MAX_CHARS = 260
 
 CAPTION_SCHEMA = {
@@ -206,13 +196,9 @@ CAPTION_PROMPT = (
     "change, movement or action that unfolds.\n"
     "Be concrete and literal. Name what is visible. Do not speculate about "
     "motives, mood or backstory, and do not mention frames, images or video.\n"
-    # Measured on 12 clips against the prompt without these two lines: the
-    # "then" chaining that made captions run long and get cut fell from 21
-    # occurrences to 16, mean length 210 -> 222, and clips hitting the ceiling
-    # 7/12 -> 6/12. Asking additionally for "at most two sentences, ending in a
-    # full stop" was tried and reverted -- it did cut "then" harder (to 10) but
-    # the model answered the full-stop request by splitting into 4.0 sentences
-    # of trailing scenery, pushing length to 250 and truncation to 8/12.
+    # Without this the model narrates frame by frame, which runs long and
+    # gets cut. Asking for a full stop as well backfires: it splits into more
+    # sentences of scenery rather than fewer.
     "Summarise the event as a whole. Do not walk through the frames one by one "
     "and do not chain clauses with \"then\" -- say what happened, once.\n"
     "Reply with JSON only. Keep every field short:\n"
@@ -261,21 +247,15 @@ class Captioner:
 
         from .config import CAPTION_MODEL
 
-        # bfloat16 only where the card has it. Ampere and later do; Turing --
-        # the Kaggle T4 -- does not, and asking for it there does not fail, it
-        # emulates, which turns captioning from slow into effectively stuck.
-        # float16 is the right fallback: same width, and Turing runs it in
-        # hardware.
+        # bfloat16 only where the card supports it. Older GPUs emulate it
+        # rather than failing, which is far slower than float16.
         want_bf16 = device.startswith("cuda") and torch.cuda.is_bf16_supported()
         compute = torch.bfloat16 if want_bf16 else torch.float16
         log.info("caption compute dtype: %s", compute)
 
-        # A checkpoint may arrive already quantized. Passing BitsAndBytesConfig
-        # for one of those conflicts with the quantization recorded in its own
-        # config, so read the config first and only quantize what is still full
-        # precision. A pre-quantized copy also skips ~5 GB of weights to read
-        # and the quantize pass at load, which matters when the weights are
-        # mounted fresh on every job.
+        # A pre-quantized checkpoint carries its own settings, and passing
+        # BitsAndBytesConfig alongside them conflicts -- so only quantize what
+        # is still full precision.
         if _has_quantization_config(CAPTION_MODEL):
             log.info("loading %s (already quantized)", CAPTION_MODEL)
             self.model = AutoModelForImageTextToText.from_pretrained(
@@ -368,17 +348,11 @@ class Captioner:
     def describe(self, clip_frames: list[list]) -> list[dict]:
         """Caption a batch of clips. clip_frames[i] is one clip's PIL images.
 
-        Two passes. The first generates unconstrained, which is about five
-        times faster: schema-constrained decoding runs a pure-Python parser
-        over a ~150k vocabulary once per token per sequence, and measured at
-        81% of all captioning time on an RTX 3090 -- it dominated the stage on
-        every machine, not just the slow ones.
-
-        The model follows the requested JSON on its own almost always. When it
-        does not, that clip alone is generated again with the enforcer, which
-        cannot produce malformed output. So the fast path carries the common
-        case and the guarantee is still there for the rest, with the retry rate
-        logged rather than assumed.
+        Generates unconstrained first, which is several times faster: the
+        schema enforcer runs a Python parser over the whole vocabulary once per
+        token per sequence and dominates the stage. The model usually emits
+        valid JSON anyway; any clip whose output does not parse is generated
+        again with the enforcer, which cannot produce malformed output.
         """
         results = self._generate(clip_frames, constrain=False)
 
@@ -519,10 +493,8 @@ class CaptionLogitsProcessor:
         return scores.masked_fill(~mask, float("-inf"))
 
 
-# Words that leave a caption hanging when the text is cut after them. Trimming
-# a severed word off "...pours it into a glass and" leaves the "and" dangling,
-# which reads worse than the fragment did. Copulas and bare articles behave the
-# same way: "...and the treehouse is" wants the "is" gone too.
+# Words that leave a caption hanging when the text is cut after them: dropping
+# a severed word off "...into a glass and" leaves the "and" stranded.
 _DANGLING = frozenset("""
 a an the and or but then while as with of to in on at by for from into onto
 before after that which who whose near over under behind toward towards
@@ -535,13 +507,10 @@ _SEPARATORS = " ,;:-\u2013\u2014"
 def tidy_caption(text: str | None) -> str | None:
     """Close off a caption that the decoder cut short.
 
-    The schema ceiling ends the string wherever the budget runs out, mid-word if
-    that is where it lands. A cut caption is still worth keeping -- almost all of
-    the content is there -- so this drops the severed tail rather than the whole
-    sentence, which is what trimming back to the last full stop would cost.
-
-    Captions under the ceiling are complete already; the model just tends to omit
-    the closing full stop, so they only get the punctuation.
+    The length ceiling ends the string wherever it lands, mid-word if need be.
+    Most of the content is still there, so this drops the severed tail rather
+    than trimming back to the last full stop. Captions under the ceiling only
+    need the closing punctuation the model tends to omit.
     """
     text = (text or "").strip()
     if not text:

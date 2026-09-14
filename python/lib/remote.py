@@ -1,26 +1,16 @@
 """Run a job on Kaggle's free GPU and bring the answer back.
 
-The deployment target has no RAM for the models -- not even the two the search
-path needs -- so the work happens on a Kaggle kernel instead. Go is unchanged:
-it still runs search.py and index.py and still speaks the same JSON protocol.
-Only what happens behind that protocol moves.
+For deployments with no RAM for the models. Go is unchanged: it still runs
+search.py and index.py and speaks the same JSON protocol; only what happens
+behind that protocol moves.
 
-Two things are worth knowing before reading further.
+Kaggle offers no way to hold a process open and call into it, so a job is:
+push a notebook, poll until it finishes, read its output. That costs minutes
+per job, which is inherent to the approach rather than a fault in it.
 
-**Every job is a fresh kernel.** Kaggle offers no way to hold a process open and
-call into it, so a job is: push a notebook, poll until it finishes, read its
-output. A no-op kernel measured 40 seconds from push to output on this account,
-and that is the floor -- before any model loads. Search here costs minutes, not
-the 285ms it costs locally. That is inherent to the approach, not a bug in it.
-
-**The kernel carries its own code.** The notebook embeds a base64 tarball of
-python/, so the kernel always runs exactly the code in this repo. The obvious
-alternative -- keeping a "code" dataset on Kaggle and attaching it -- needs a
-separate upload every time anything changes here, and silently runs stale code
-when that upload is forgotten.
-
-Weights are the exception: they come from attached datasets, because they are
-gigabytes and they do not change. See models/README.md.
+The notebook carries its own code as an embedded tarball, so the kernel always
+runs what is in this repo. Weights are the exception -- they come from attached
+datasets, being large and unchanging. See models/README.md.
 """
 from __future__ import annotations
 
@@ -40,25 +30,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger(__name__)
 
-# The kernel prints its answer on one line with this marker. Kaggle's output is
-# the whole notebook log -- every warning, every progress bar -- so the result
-# has to be findable rather than "the last line".
+# The kernel marks its answer so it can be found in a log that also holds
+# every warning and progress bar the notebook produced.
 RESULT_MARKER = "__VS_RESULT__"
 
 KAGGLE_USER = os.environ.get("KAGGLE_USERNAME", "biganradu335ca")
 
-# One slug per job kind, reused. Kaggle keeps versions, so pushing again is an
-# update rather than a new notebook -- which matters because an account
-# accumulating a kernel per search would be both unusable and rude.
+# One slug per job kind, reused: pushing again is a new version rather than a
+# new notebook, so the account does not accumulate one kernel per search.
 SLUGS = {"search": "vs-search-worker", "index": "vs-index-worker"}
 
-# Attached weights, per job kind. Search does not attach the captioner: it
-# would add ~8 GB of mount time to a job that never opens it.
-# vs-config carries the database URL. It has to be a dataset rather than a
-# Kaggle Secret: secrets attached in the notebook editor are NOT preserved when
-# a notebook is pushed through the API, and kernel-metadata.json has no field
-# for them -- so with a fresh push per job, an attached secret is wiped every
-# time. Dataset attachments do survive, because they are in that metadata.
+# Attached weights, per job kind. Search omits the captioner rather than
+# mounting gigabytes it never opens.
+# vs-config carries the database URL. A dataset rather than a Kaggle Secret
+# because secrets are not preserved when a notebook is pushed through the API,
+# while dataset attachments are.
 CONFIG_DATASET = f"{KAGGLE_USER}/vs-config"
 
 DATASETS = {
@@ -73,25 +59,17 @@ DATASETS = {
     ],
 }
 
-# How long to wait before giving up, per kind. Indexing is a minute of GPU per
-# minute of video; search should never be slow enough to reach its limit, so
-# hitting it means something is wrong rather than merely slow.
+# How long to wait before giving up. Search reaching its limit means something
+# is wrong rather than merely slow.
 TIMEOUTS = {"search": 15 * 60, "index": 3 * 60 * 60}
 
 POLL_SECONDS = float(os.environ.get("KAGGLE_POLL_SECONDS", 10))
 
-# What each kind needs that Kaggle's image lacks. Deliberately short: every
-# entry is seconds added to every job, and torch/transformers are already there.
-#
-# sentencepiece is not optional despite tokenizer.json being present: on
-# Kaggle's transformers, bge-m3's XLM-R tokenizer falls back to converting the
-# slow tokenizer and fails without it. It worked when the model came straight
-# from Hugging Face and broke when it came from an attached dataset, which made
-# it look like a bad upload -- the files were byte-identical.
+# What each kind needs that Kaggle's image lacks. Kept short: every entry is
+# seconds added to every job, and torch and transformers are already there.
 PIPS = {
     "search": ["psycopg[binary]", "sentencepiece", "protobuf"],
-    # bitsandbytes is what loads the captioner in 4-bit. Kaggle's image does
-    # not carry it, and transformers only says so once it reaches the load.
+    # bitsandbytes loads the captioner in 4-bit and is not in Kaggle's image.
     "index": ["psycopg[binary]", "sentencepiece", "protobuf", "bitsandbytes",
               "yt-dlp", "faster-whisper", "lm-format-enforcer"],
 }
@@ -112,9 +90,8 @@ class Job:
 def _api():
     """An authenticated Kaggle client.
 
-    Imported lazily: the package authenticates on import and raises when no
-    credentials are present, which must not happen merely because something
-    imported this module on a machine that never talks to Kaggle.
+    Imported lazily: the package authenticates on import and raises without
+    credentials, which should not happen just because this module was imported.
     """
     from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -126,9 +103,8 @@ def _api():
 def _bundle() -> str:
     """python/ as a base64 tarball, for the notebook to unpack.
 
-    Only .py files, and not __pycache__: the bundle is embedded in a JSON
-    notebook that is uploaded on every single job, so its size is paid over and
-    over. The whole tree compresses to tens of kilobytes.
+    Source only: the bundle is uploaded with every job, so its size is paid
+    repeatedly. The whole tree compresses to tens of kilobytes.
     """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -142,9 +118,8 @@ def _bundle() -> str:
 def _notebook(job: Job) -> dict:
     """The notebook that runs one job.
 
-    Kept to a single cell on purpose. A multi-cell notebook that fails in cell 2
-    still "completes", and the failure has to be inferred from the absence of
-    output; one cell either raises or prints a result.
+    One cell, so the job either raises or prints a result -- a multi-cell
+    notebook that fails partway still reports as complete.
     """
     body = _KERNEL_SOURCE % {
         "bundle": _bundle(),
@@ -171,11 +146,8 @@ def _metadata(job: Job, slug: str) -> dict:
         "kernel_type": "notebook",
         "is_private": True,
         "enable_gpu": job.gpu,
-        # Ask for a T4, never a P100. Kaggle's image ships torch built for
-        # CUDA 12.8, whose kernels start at sm_70 -- the P100 is sm_60, so a
-        # job that lands on one dies inside the first forward pass with
-        # "no kernel image is available for execution on the device". Without
-        # this, which GPU you get is luck.
+        # Ask for a T4: Kaggle's torch has no kernels for the older P100, and
+        # without this which GPU a job gets is luck.
         **({"machine_shape": "NvidiaTeslaT4"} if job.gpu else {}),
         "enable_internet": True,
         "dataset_sources": job.datasets or DATASETS.get(job.kind, []),
@@ -238,8 +210,7 @@ def _wait(api, ref: str, started: float, timeout: float, say) -> str:
         if state != last:
             log.info("kaggle %s: %s (%.0fs)", ref, state, waited)
             last = state
-        # Progress is reported against the timeout because Kaggle exposes no
-        # notion of how far along a running kernel is.
+        # Against the timeout, because Kaggle exposes no real progress.
         say("running", int(waited), int(timeout))
 
         if "complete" in state:
@@ -268,9 +239,8 @@ def _collect(api, ref: str, work: Path, state: str) -> dict:
 def parse_result(text: str) -> dict:
     """Find the marked result line in a kernel log.
 
-    The log is JSON-wrapped stream records, so the marker arrives escaped and
-    cannot simply be split on. Searching for the last occurrence matters: a
-    retried cell would leave two, and the later one is the live answer.
+    The log wraps stdout in JSON records, so the marker arrives escaped. The
+    last occurrence wins: a retried cell leaves more than one.
     """
     matches = re.findall(RESULT_MARKER + r"(?:\\n)?\s*(\{.*?\})\s*(?:\\n|\Z|\")",
                          text, re.DOTALL)
@@ -278,11 +248,8 @@ def parse_result(text: str) -> dict:
         raise RemoteError("the job produced no result "
                           "(it may have run out of memory or time)")
     raw = matches[-1]
-    # Undo the JSON-string escaping the log wrapper applied -- and only that.
-    # An earlier version also turned \n into a real newline, which corrupted any
-    # result carrying a multi-line message (an ffmpeg error, say): \n is a valid
-    # escape *inside* JSON, and rewriting it puts a raw control character in a
-    # string. The backslash rule below already yields the right thing.
+    # Undo the log wrapper's escaping, and only that: \n is a valid escape
+    # inside JSON, so unescaping it here would break multi-line messages.
     raw = raw.replace('\\"', '"').replace("\\\\", "\\")
     try:
         return json.loads(raw)
@@ -290,12 +257,9 @@ def parse_result(text: str) -> dict:
         raise RemoteError(f"the job's result was not valid JSON: {exc}") from exc
 
 
-# The kernel body. Written as a template rather than a file so that what runs
-# remotely is versioned here beside what calls it.
-#
-# It unpacks the bundle, puts it on sys.path, and hands off to the same
-# functions the local path uses -- there is no second implementation of search
-# or indexing to keep in step.
+# The kernel body, kept here so what runs remotely sits beside what calls it.
+# It unpacks the bundle and hands off to the same functions the local path
+# uses, so there is no second implementation to keep in step.
 _KERNEL_SOURCE = r'''
 import base64, io, json, os, sys, tarfile, traceback, time
 
@@ -313,18 +277,13 @@ KIND = "%(kind)s"
 MARKER = "%(marker)s"
 
 # --- dependencies Kaggle does not ship ----------------------------------------
-# Kaggle's image has torch and transformers, which are the big ones, but it
-# ships psycopg2 rather than psycopg 3 -- and this codebase uses 3. Installing
-# is a few seconds against a job measured in minutes, so it is not worth
-# vendoring. --quiet because pip's output is longer than the job's.
+# A few seconds against a job measured in minutes, so not worth vendoring.
 _NEED = %(pips)s
 if _NEED:
     import subprocess
-    # Pin whatever torch Kaggle already installed. faster-whisper and friends
-    # pull their own torch otherwise, and the replacement is built for
-    # different compute capabilities than the GPU in the box -- which surfaces
-    # much later as "CUDA error: no kernel image is available for execution on
-    # the device", a long way from the pip line that caused it.
+    # Pin whatever torch Kaggle installed: a dependency pulling its own build
+    # gets one compiled for different GPUs, which fails much later and a long
+    # way from the pip line that caused it.
     _pins = "/tmp/vs-constraints.txt"
     try:
         import torch, torchvision
@@ -345,17 +304,11 @@ if _NEED:
         print(f"torch unusable after install: {_e}", flush=True)
 
 def _finish(obj):
-    # One line, marked. Kaggle's log is everything the notebook wrote, so the
-    # answer has to be findable rather than positional.
+    # Marked, because the log holds everything the notebook wrote.
     print(MARKER + " " + json.dumps(obj), flush=True)
 
 # --- credentials --------------------------------------------------------------
-# Kaggle Secrets first: a DSN embedded in the notebook would be stored on
-# Kaggle in the source of every job ever pushed. The payload fallback exists so
-# this works before the secret is configured, and warns when it is used.
-# Where the file lands depends on how the dataset was made: uploading a folder
-# keeps its name, so config.json can sit one level down. Both are normal, so
-# look rather than assume a path.
+# From the attached dataset, whose depth depends on how it was uploaded.
 _CONFIG = {}
 for _cfg in ("/kaggle/input/vs-config/config.json",
              "/kaggle/input/vs-config/vs-config/config.json"):
@@ -373,9 +326,8 @@ else:
         break
 
 def _secret(name, fallback=None):
-    # The attached dataset first, then a Kaggle Secret for anyone running this
-    # notebook by hand, then whatever the job carried. The last of those puts
-    # the value in the stored source of every pushed version, so it warns.
+    # Dataset first, then a Kaggle Secret, then whatever the job carried --
+    # the last of which ends up in the stored notebook source, so it warns.
     if _CONFIG.get(name):
         return _CONFIG[name]
     try:
@@ -389,9 +341,8 @@ def _secret(name, fallback=None):
 
 os.environ["DATABASE_URL"] = _secret("DATABASE_URL", PAYLOAD.get("database_url", ""))
 
-# YouTube refuses datacentre addresses far more readily than home ones, and
-# once it asks to "confirm you're not a bot" no player client gets past it.
-# A cookies.txt placed in the vs-config dataset is the way through.
+# YouTube refuses datacentre addresses more readily, and no player client gets
+# past a bot challenge. A cookies.txt in vs-config is the way through.
 for _ck in ("/kaggle/input/vs-config/cookies.txt",
             "/kaggle/input/vs-config/vs-config/cookies.txt"):
     if os.path.exists(_ck):
@@ -406,8 +357,8 @@ if _gem:
     os.environ["GEMINI_API_KEY"] = _gem
 
 # --- point the pipeline at the attached weights -------------------------------
-# Each dataset mounts under /kaggle/input/<slug>. Setting the model paths to
-# those directories is what turns a multi-gigabyte download into a disk read.
+# Each dataset mounts under /kaggle/input/<slug>, turning a download into a
+# disk read.
 _INPUT = "/kaggle/input"
 # Each variable may name several datasets; the first one attached wins. The
 # captioner lists the pre-quantized build first because it is less than half

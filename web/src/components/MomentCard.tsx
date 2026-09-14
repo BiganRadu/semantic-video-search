@@ -5,13 +5,9 @@ import { ExternalIcon } from "./Icons";
 import Thumbnail from "./Thumbnail";
 
 /**
- * One ranked moment.
- *
- * The per-signal scores that used to sit here were a debugging instrument that
- * outlived its job: raw fusion numbers ("visual 0.109") mean nothing to someone
- * searching, and two results a hair apart looked meaningfully different. Which
- * signals ran is still reported once, on the results header, where it explains
- * the whole page instead of decorating every row.
+ * One ranked moment. Raw fusion scores are deliberately not shown: they mean
+ * nothing to someone searching, and near-identical results looked meaningfully
+ * different. Which signals ran is reported once, on the results header.
  */
 export default function MomentCard({
   moment, rank, query,
@@ -45,13 +41,10 @@ export default function MomentCard({
 
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="row" style={{ gap: 9 }}>
-          {/*
-            One timestamp. Adjacent clips are still merged — that is what stops
-            one event filling the page — but the merged span was always the 20s
-            cap rather than the length of anything real (31 of 32 results hit it
-            exactly), so reporting it claimed a precision the system does not
-            have. The seek point is the answer.
-          */}
+          {/* One timestamp. Clips are still merged — that is what stops one
+              event filling the page — but the merged span is usually the cap
+              rather than anything real, so showing it would claim a precision
+              the system does not have. */}
           <span className="timecode">{mmss(seek)}</span>
           <Link to={to} className="truncate dim" style={{ fontSize: 13.5 }}>
             {moment.video_id}
