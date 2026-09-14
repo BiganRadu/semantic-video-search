@@ -185,6 +185,48 @@ func (s *Store) IndexedIDs(ctx context.Context) (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// ReleaseInterruptedIndexes clears rows left mid-index by a process that is no
+// longer running.
+//
+// Jobs live in memory, so a restart forgets them -- but the row they claimed
+// says 'indexing' forever, and the library shows a video that will never
+// finish and cannot be retried, because re-adding it finds the row already
+// there. Anything still marked indexing at startup was interrupted by
+// definition: this process has not begun any work yet.
+func (s *Store) ReleaseInterruptedIndexes(ctx context.Context) (int64, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE videos SET state = 'failed',
+		       last_error = 'indexing was interrupted by a server restart'
+		WHERE state = 'indexing'`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkIndexing claims the row before the work starts.
+//
+// Without it an interrupted index leaves nothing at all: the row was only
+// written on success, so a job killed part-way through was indistinguishable
+// from one that never ran -- no record, no error, no trace. The placeholder
+// makes a job in flight visible, and a job that died visible as stuck rather
+// than as absent.
+//
+// Existing columns are left alone on conflict: re-adding a video that is
+// already indexed must not blank its clips or its title until the new run has
+// something to replace them with.
+func (s *Store) MarkIndexing(ctx context.Context, id string, source, owner string,
+	expires *time.Time) error {
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO videos (id, locator, source, duration_s, state, owner, expires_at)
+		VALUES ($1, '{"kind":"pending"}'::jsonb, $2, 0, 'indexing', $3, $4)
+		ON CONFLICT (id) DO UPDATE SET
+			state = 'indexing', last_error = NULL, progress = NULL,
+			owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at`,
+		id, source, owner, expires)
+	return err
+}
+
 // MarkFailed records why a video could not be indexed, so a rerun retries only
 // the failures instead of the whole corpus.
 func (s *Store) MarkFailed(ctx context.Context, id string, loc Locator, source string, cause error) error {
@@ -223,6 +265,11 @@ func (s *Store) ListVideos(ctx context.Context, owner string) ([]VideoSummary, e
 		FROM videos v
 		WHERE (v.expires_at IS NULL OR v.expires_at > now())
 		  AND CASE WHEN $1 = '' THEN v.owner IS NULL ELSE v.owner = $1 END
+		  -- A video still being indexed is not in the library yet: it has no
+		  -- duration, no clips and a placeholder locator, so it would render as
+		  -- a broken card. The jobs dock is where work in flight is reported.
+		  -- A failed one stays listed, because that is a result worth seeing.
+		  AND v.state <> 'indexing'
 		ORDER BY v.indexed_at DESC NULLS LAST, v.id`, owner)
 	if err != nil {
 		return nil, err

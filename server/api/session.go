@@ -14,8 +14,10 @@ const (
 	sessionCookie = "vs_session"
 	sessionTTL    = 30 * 24 * time.Hour
 	// Session videos stop being searchable after this, so an abandoned upload
-	// does not sit in the index forever.
-	videoTTL = 7 * 24 * time.Hour
+	// does not sit in the index forever. Short on purpose: indexing is the
+	// scarce resource here, and a video nobody signed in to keep is one nobody
+	// is coming back for.
+	videoTTL = 24 * time.Hour
 )
 
 type sessionKey struct{}

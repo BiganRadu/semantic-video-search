@@ -43,11 +43,14 @@ type Server struct {
 	// Sign-in attempts per client address per minute. Guessing a password
 	// should cost something even before it reaches the KDF.
 	logins *limiter
+
+	// Indexes in flight, so they survive the request that started them.
+	jobs *jobs
 }
 
 func New(cfg Config, st *store.Store, s *pyproc.Searcher, ix *pyproc.Indexer, log *slog.Logger) *Server {
 	return &Server{cfg: cfg, store: st, searcher: s, indexer: ix, log: log,
-		logins: newLimiter(10)}
+		logins: newLimiter(10), jobs: newJobs()}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -74,6 +77,7 @@ func (s *Server) Routes() http.Handler {
 		// Reads are public: the hosted demo is read-only.
 		r.Get("/search", s.apiSearch)
 		r.Get("/videos", s.apiListVideos)
+		r.Get("/jobs", s.apiJobs)
 		r.Get("/videos/{id}", s.apiVideoDetail)
 
 		// Writes exist only where indexing does, and can require a token.
@@ -188,7 +192,7 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	// Assembly parameters are forwarded verbatim, as strings; search.py owns
 	// their defaults and their parsing, so there is one place they are defined.
-	for _, name := range []string{"assemble", "moment_gap", "moment_max_len", "moment_decay", "moment_floor", "moment_per_video", "min_relevance"} {
+	for _, name := range []string{"assemble", "moment_gap", "moment_max_len", "moment_decay", "moment_floor", "moment_per_video", "min_relevance", "route"} {
 		if v := q.Get(name); v != "" {
 			req[name] = v
 		}
@@ -221,6 +225,16 @@ func (s *Server) apiSearch(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	}
 	_, _ = w.Write(raw)
+}
+
+// apiJobs is what this visitor is waiting on: their own index jobs, queued,
+// running and recently finished.
+//
+// Scoped to the owner, not the server. Whose videos are being indexed is not
+// something one visitor should learn from another's queue -- only the fact
+// that something is ahead of them, which the position carries.
+func (s *Server) apiJobs(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.jobs.viewFor(ownerKey(r))})
 }
 
 func (s *Server) apiListVideos(w http.ResponseWriter, r *http.Request) {

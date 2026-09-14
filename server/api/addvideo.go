@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,7 +14,13 @@ import (
 	"time"
 
 	"videosearch/server/pyproc"
+	"videosearch/server/store"
 )
+
+// Indexing runs at roughly a minute of GPU per minute of video and the source
+// duration is already capped, so this bounds a hung yt-dlp or a wedged model
+// load rather than a slow video.
+const indexTimeout = 2 * time.Hour
 
 type addVideoRequest struct {
 	URL   string `json:"url"`
@@ -56,8 +63,79 @@ func (s *Server) apiAddVideo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 		return
 	}
+
+	// A video kept by an account is kept until its owner deletes it; one added
+	// without an account rides on the anonymous session and lapses with it.
+	// Decided here, while the request is still in hand -- the job outlives it.
+	var expires *time.Time
+	if userFrom(r) == nil {
+		lapse := time.Now().Add(videoTTL)
+		expires = &lapse
+	}
+	title := req.Title
+	url := req.URL
+
+	// Detached from this request on purpose. r.Context() dies when the browser
+	// does, and everything below -- the subprocess, and the save that makes its
+	// work permanent -- has to survive that.
+	bg := context.WithoutCancel(r.Context())
+
+	// Until the pipeline resolves the real title, the submitted link is a
+	// better label than the generated row id.
+	label := title
+	if label == "" {
+		label = url
+	}
+
+	j, started := s.jobs.startOrAttach(videoID, owner, label, func(j *job) {
+		emit := j.emit
+		ctx, cancel := context.WithTimeout(bg, indexTimeout)
+		defer cancel()
+
+		// Claim the row first, so an index that dies mid-flight leaves a trace.
+		if err := s.store.MarkIndexing(ctx, videoID, "user", owner, expires); err != nil {
+			emit(map[string]any{"event": "error", "message": err.Error()})
+			return
+		}
+
+		result, err := s.indexer.Run(ctx, url, videoID, func(ev pyproc.Event) { emit(ev) })
+		if err != nil {
+			s.markFailed(ctx, videoID, err)
+			emit(map[string]any{"event": "error", "message": err.Error()})
+			return
+		}
+
+		result.Source = "user"
+		// index.py reports the video's own title; a title typed on the form
+		// wins, because someone who bothered to name it meant it.
+		if title != "" {
+			result.Title = title
+		}
+		// Now the status panel can name the video instead of showing a slug.
+		j.setTitle(result.Title)
+		result.Owner = &owner
+		result.ExpiresAt = expires
+
+		emit(pyproc.Event{Event: "progress", Stage: "save"})
+		if err := s.store.Save(ctx, result); err != nil {
+			s.markFailed(ctx, videoID, err)
+			emit(map[string]any{"event": "error", "message": err.Error()})
+			return
+		}
+
+		done := map[string]any{
+			"event": "done", "video_id": videoID,
+			"clips": len(result.Clips), "duration_s": result.DurationS,
+		}
+		if expires != nil {
+			done["expires_at"] = expires.Format(time.RFC3339)
+		}
+		emit(done)
+	})
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
 	send := func(payload any) {
@@ -66,45 +144,52 @@ func (s *Server) apiAddVideo(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	result, err := s.indexer.Run(r.Context(), req.URL, videoID, func(ev pyproc.Event) {
+	if !started {
+		// A refresh mid-index lands here: say so, then replay from the start so
+		// the page shows the stage it is actually on rather than restarting.
+		send(map[string]any{"event": "progress", "stage": "already queued"})
+	}
+
+	history, ch := j.attach()
+	for _, ev := range history {
 		send(ev)
-	})
-	if err != nil {
-		send(map[string]any{"event": "error", "message": err.Error()})
-		return
 	}
+	if ch == nil {
+		return // finished before we attached; history was the whole story
+	}
+	defer j.detach(ch)
 
-	result.Source = "user"
-	// index.py reports the video's own title; a title typed on the form wins,
-	// because someone who bothered to name it meant it.
-	if req.Title != "" {
-		result.Title = req.Title
+	seen := len(history)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				// Job ended. Anything dropped while we were slow is still in
+				// history, so the client always sees the terminal event.
+				for _, ev := range j.since(seen) {
+					send(ev)
+				}
+				return
+			}
+			seen++
+			send(ev)
+		case <-r.Context().Done():
+			return // the viewer left; the job carries on without them
+		}
 	}
-	result.Owner = &owner
+}
 
-	// A video kept by an account is kept until its owner deletes it; one added
-	// without an account rides on the anonymous session and lapses with it.
-	var expires *time.Time
-	if userFrom(r) == nil {
-		lapse := time.Now().Add(videoTTL)
-		expires = &lapse
+// markFailed records a failure without letting a dead context hide it: the
+// usual cause of the failure is the context, and reporting it needs a live one.
+func (s *Server) markFailed(ctx context.Context, videoID string, cause error) {
+	if ctx.Err() != nil {
+		ctx = context.Background()
 	}
-	result.ExpiresAt = expires
-
-	send(map[string]any{"event": "progress", "stage": "save"})
-	if err := s.store.Save(r.Context(), result); err != nil {
-		send(map[string]any{"event": "error", "message": err.Error()})
-		return
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.store.MarkFailed(ctx, videoID, store.Locator{Kind: "pending"}, "user", cause); err != nil {
+		s.log.Error("recording index failure", "video", videoID, "err", err)
 	}
-
-	done := map[string]any{
-		"event": "done", "video_id": videoID,
-		"clips": len(result.Clips), "duration_s": result.DurationS,
-	}
-	if expires != nil {
-		done["expires_at"] = expires.Format(time.RFC3339)
-	}
-	send(done)
 }
 
 // slugFor turns a submitted URL into the readable half of a database key.
