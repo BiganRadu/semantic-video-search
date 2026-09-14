@@ -28,10 +28,13 @@ type Indexer struct {
 	python string
 	script string
 	log    *slog.Logger
+	remote bool
 }
 
-func NewIndexer(python, script string, log *slog.Logger) *Indexer {
-	return &Indexer{python: python, script: script, log: log}
+// NewIndexer builds the indexer. remote runs the pipeline on a Kaggle kernel,
+// which writes its own rows and returns a summary rather than the clips.
+func NewIndexer(python, script string, log *slog.Logger, remote bool) *Indexer {
+	return &Indexer{python: python, script: script, log: log, remote: remote}
 }
 
 type wireClip struct {
@@ -91,7 +94,11 @@ func (ix *Indexer) Run(ctx context.Context, url, videoID string, onEvent func(Ev
 	// index.py also takes --source for a file already on disk, but nothing in
 	// Go uses it: the bulk corpus script is Python and imports index_video
 	// directly, because loading SigLIP once beats loading it per video.
-	cmd := exec.CommandContext(ctx, ix.python, ix.script, "--url", url, "--video-id", videoID)
+	args := []string{ix.script, "--url", url, "--video-id", videoID}
+	if ix.remote {
+		args = append(args, "--remote")
+	}
+	cmd := exec.CommandContext(ctx, ix.python, args...)
 	cmd.Stderr = newLogWriter(ix.log, "index.py")
 
 	stdout, err := cmd.StdoutPipe()

@@ -25,6 +25,7 @@ import (
 type Searcher struct {
 	python string
 	script string
+	remote bool
 	log    *slog.Logger
 
 	mu     sync.Mutex // one request at a time; the protocol is a single pipe
@@ -33,8 +34,10 @@ type Searcher struct {
 	stdout *bufio.Reader
 }
 
-func NewSearcher(python, script string, log *slog.Logger) *Searcher {
-	return &Searcher{python: python, script: script, log: log}
+// NewSearcher builds the worker. remote sends every query to Kaggle instead of
+// loading the encoders locally -- the free tier has no RAM for them.
+func NewSearcher(python, script string, log *slog.Logger, remote bool) *Searcher {
+	return &Searcher{python: python, script: script, log: log, remote: remote}
 }
 
 // Start launches the worker and waits for it to report readiness.
@@ -45,7 +48,11 @@ func (s *Searcher) Start(ctx context.Context) error {
 }
 
 func (s *Searcher) startLocked(ctx context.Context) error {
-	cmd := exec.Command(s.python, s.script, "--serve")
+	args := []string{s.script, "--serve"}
+	if s.remote {
+		args = append(args, "--remote")
+	}
+	cmd := exec.Command(s.python, args...)
 	cmd.Stderr = newLogWriter(s.log, "search.py")
 
 	stdin, err := cmd.StdinPipe()

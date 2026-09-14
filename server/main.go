@@ -54,6 +54,8 @@ func main() {
 	python := flag.String("python", envOr("PYTHON", defaultPython()), "python interpreter")
 	pyDir := flag.String("python-dir", envOr("PYTHON_DIR", "python"), "directory holding index.py and search.py")
 	indexing := flag.Bool("indexing", envBool("INDEXING_ENABLED", true), "enable the indexing path")
+	remote := flag.Bool("remote", envBool("REMOTE_MODELS", false),
+		"run the models on Kaggle instead of this machine (for hosts with no RAM for them)")
 	token := flag.String("auth-token", os.Getenv("AUTH_TOKEN"), "bearer token for write endpoints")
 	static := flag.String("static", envOr("STATIC_DIR", "web/dist"), "built frontend to serve, if present")
 	origins := flag.String("cors", envOr("CORS_ORIGINS", "http://localhost:5173"), "comma-separated allowed origins")
@@ -74,6 +76,14 @@ func main() {
 	}
 	defer st.Close()
 
+	// Any row still marked 'indexing' belongs to a process that is gone: jobs
+	// are held in memory, so nothing survived the restart that claimed them.
+	if n, err := st.ReleaseInterruptedIndexes(ctx); err != nil {
+		log.Warn("releasing interrupted indexes", "err", err)
+	} else if n > 0 {
+		log.Info("released interrupted indexes", "videos", n)
+	}
+
 	searchScript := filepath.Join(*pyDir, "search.py")
 	indexScript := filepath.Join(*pyDir, "index.py")
 
@@ -85,8 +95,13 @@ func main() {
 			*indexing = false
 		}
 	}
+	if *remote {
+		// Worth saying out loud: in this mode nothing is computed here, and a
+		// query costs minutes rather than milliseconds.
+		log.Info("remote models: search and indexing run on Kaggle kernels")
+	}
 
-	searcher := pyproc.NewSearcher(*python, searchScript, log)
+	searcher := pyproc.NewSearcher(*python, searchScript, log, *remote)
 	log.Info("starting search worker", "script", searchScript)
 	if err := searcher.Start(ctx); err != nil {
 		log.Error("search worker", "err", err)
@@ -107,7 +122,7 @@ func main() {
 			AllowedOrigins:  strings.Split(*origins, ","),
 			StaticDir:       staticDir,
 		},
-		st, searcher, pyproc.NewIndexer(*python, indexScript, log), log,
+		st, searcher, pyproc.NewIndexer(*python, indexScript, log, *remote), log,
 	)
 
 	httpSrv := &http.Server{
